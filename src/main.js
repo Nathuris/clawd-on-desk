@@ -2936,6 +2936,16 @@ agentRuntime = createAgentRuntimeMain({
 });
 
 // ── HTTP server — delegated to src/server.js ──
+// 名单内编辑器窗口可见时不弹权限气泡（fork 个性化）。
+// 探测器与闸门在 _serverCtx 之前创建：_settingsController 已在上方定义，
+// 且 getEnabled / getAppNames 是惰性 getter，每次判定都实时读设置，无需订阅变更。
+const { createVisibleAppProbe, createEditorVisibleSuppressGate } = require("./editor-window-visibility");
+const _editorVisibleProbe = createVisibleAppProbe();
+const _editorVisibleGate = createEditorVisibleSuppressGate({
+  getEnabled: () => _settingsController.get("suppressPermissionWhenEditorVisible") === true,
+  getAppNames: () => _settingsController.get("permissionSuppressEditorApps") || [],
+  probe: _editorVisibleProbe,
+});
 const _serverCtx = {
   get manageClaudeHooksAutomatically() { return manageClaudeHooksAutomatically; },
   get autoStartWithClaude() { return autoStartWithClaude; },
@@ -2974,6 +2984,8 @@ const _serverCtx = {
   getAgentIntegrationOptions: _getAgentIntegrationOptions,
   isAgentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentPermissionsEnabled(agentId),
   isAgentSubagentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentSubagentPermissionsEnabled(agentId),
+  // 名单内编辑器窗口可见时不弹权限气泡：实时读设置，任何异常都 fail-open（不压制）。
+  shouldSuppressPermissionForVisibleEditor: () => _editorVisibleGate.shouldSuppress(),
   isCodexNativeNotificationSoundEnabled: () => _runtimeAgentGate.isCodexNativeNotificationSoundEnabled(),
   isCodexPermissionInterceptEnabled: () => _runtimeAgentGate.isCodexPermissionInterceptEnabled(),
   codexSubagentClassifier: agentRuntime.getCodexSubagentClassifier(),

@@ -62,6 +62,7 @@ const {
   PET_ACCESSORY_IDS,
   PET_MOUTH_ACCESSORY_IDS,
 } = require("./pet-customization-catalog");
+const { normalizeEditorAppList } = require("./editor-window-visibility");
 
 const CURRENT_VERSION = 20;
 const DEFAULT_INTEGRATION_INSTALLED_IDS = Object.freeze(["claude-code", "codex"]);
@@ -249,6 +250,17 @@ const SCHEMA = {
   },
   hideBubbles: { type: "boolean", default: false },
   permissionBubblesEnabled: { type: "boolean", default: true },
+  // fork 个性化：名单内编辑器有窗口显示在桌面上时，权限请求不弹 Clawd 气泡，
+  // 直接断连回落到 Claude Code 原生确认界面。默认开启（fork 个性化默认值）。
+  // Linux 无窗口探测能力，该功能在 Linux 上恒不生效（闸门 fail-open 照常弹窗）。
+  suppressPermissionWhenEditorVisible: { type: "boolean", default: true },
+  // 上述压制生效的应用名单（人话名字，默认 VSCode）。
+  // 详见 editor-window-visibility.js 的名字匹配与清洗规则。
+  permissionSuppressEditorApps: {
+    type: "array",
+    defaultFactory: () => ["Visual Studio Code"],
+    normalize: normalizeEditorAppList,
+  },
   // Global permission automation keeps the user's safe startup preference.
   // `off` and `auto-tools` survive relaunches; `unattended` is a runtime-only
   // elevation that validate() always downgrades to `auto-tools` for disk/load.

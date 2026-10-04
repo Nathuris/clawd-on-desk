@@ -171,3 +171,7 @@ Microsoft/
 
 # Emoji export scratch
 clawd-emoji-final/
+
+# 本地克隆出来的完整仓库副本（自带 .git）。它不是本项目的一部分；
+# 不挡住的话「提交全部更改」会把它当成嵌入式仓库带进提交，变成坏掉的子模块指针。
+/clawd-on-desk/

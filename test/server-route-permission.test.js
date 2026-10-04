@@ -3272,3 +3272,122 @@ describe("destructive-action reminder — the route stamps what it accepted", ()
     assert.deepStrictEqual(entry.permissionReminder, { hold: true, tag: "publish" });
   });
 });
+
+// fork 个性化：名单内编辑器窗口可见时，权限请求不弹 Clawd 气泡、不发远程卡片，
+// 直接断连回落到 Claude Code 原生确认界面。绝不代用户 allow / deny。
+// 闸门刻意排在 headless 自动拒绝与 PASSTHROUGH 自动放行之后，只拦截「本来会弹窗」的请求。
+describe("编辑器可见压制", () => {
+  it("名单内编辑器可见时直接断连，不弹气泡、不发远程卡片", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    }), {
+      ctx: { shouldSuppressPermissionForVisibleEditor: () => true },
+    });
+
+    assert.strictEqual(res.destroyed, true, "connection drop returns control to Claude's native prompt");
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, []);
+    assert.deepStrictEqual(res.ctx.calls.addPendingPermission, []);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+  });
+
+  it("气泡关闭时同样不发远程卡片（闸门必须排在 remote-only 路径之前）", async () => {
+    // 上一条在默认 hideBubbles=false 下锁不住 remote-only 分支：那里根本不会
+    // 发远程卡片。这里把气泡关掉，请求本来会走 tryRemoteOnlyApproval 发
+    // Telegram / 飞书卡片——照 subagent 先例用 recording stub（返回 true）：
+    // 闸门一旦被挪到 remote-only 之后，卡片就会发出去、连接也不再断开，
+    // 下面两条断言会直接变红。绝不能在编辑器可见时发远程卡片。
+    const remoteCalls = [];
+    const res = await callPermissionPost(JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    }), {
+      ctx: {
+        hideBubbles: true,
+        shouldSuppressPermissionForVisibleEditor: () => true,
+        maybeStartRemoteApproval: (entry) => {
+          remoteCalls.push(entry);
+          return true;
+        },
+      },
+    });
+
+    assert.strictEqual(res.destroyed, true);
+    assert.deepStrictEqual(remoteCalls, []);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+  });
+
+  it("elicitation（AskUserQuestion）同样被压制", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      tool_name: "AskUserQuestion",
+      tool_input: {
+        questions: [{
+          question: "Continue?",
+          options: [{ label: "Yes" }, { label: "No" }],
+        }],
+      },
+    }), {
+      ctx: { shouldSuppressPermissionForVisibleEditor: () => true },
+    });
+
+    assert.strictEqual(res.destroyed, true);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, []);
+    assert.deepStrictEqual(res.ctx.calls.addPendingPermission, []);
+  });
+
+  it("闸门返回 false 时气泡照常创建", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    }), {
+      ctx: { shouldSuppressPermissionForVisibleEditor: () => false },
+    });
+
+    assert.strictEqual(res.destroyed, false);
+    assert.strictEqual(res.ctx.pendingPermissions.length, 1);
+    assert.strictEqual(res.ctx.calls.showPermissionBubble.length, 1);
+    assert.strictEqual(res.ctx.calls.addPendingPermission.length, 1);
+  });
+
+  it("headless 会话仍走自动拒绝，不被闸门吞掉", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      session_id: "claude:headless-editor",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    }), {
+      ctx: {
+        sessions: new Map([[localSessionKey("claude:headless-editor"), { headless: true }]]),
+        shouldSuppressPermissionForVisibleEditor: () => true,
+      },
+    });
+
+    assert.strictEqual(res.destroyed, false, "headless auto-deny must answer, not drop");
+    assert.deepStrictEqual(res.ctx.calls.sendPermissionResponse, [{
+      behavior: "deny",
+      message: "Non-interactive session; auto-denied",
+    }]);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+  });
+
+  it("PASSTHROUGH 工具仍自动放行，不被闸门吞掉", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      tool_name: "TaskList",
+      tool_input: {},
+    }), {
+      ctx: {
+        PASSTHROUGH_TOOLS: new Set(["TaskList"]),
+        shouldSuppressPermissionForVisibleEditor: () => true,
+      },
+    });
+
+    assert.strictEqual(res.destroyed, false, "passthrough auto-allow must answer, not drop");
+    assert.deepStrictEqual(res.ctx.calls.sendPermissionResponse, [{
+      behavior: "allow",
+      message: undefined,
+    }]);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+  });
+});

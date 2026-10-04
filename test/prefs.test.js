@@ -226,6 +226,14 @@ describe("prefs.getDefaults", () => {
     assert.strictEqual(d.agents.codex.nativeNotificationSoundEnabled, false);
   });
 
+  it("defaults editor-visible permission suppression on with VSCode in the app list", () => {
+    // fork 个性化：开关默认开启，名单默认 VSCode（人话名字，匹配规则见
+    // editor-window-visibility.js）。
+    const d = prefs.getDefaults();
+    assert.strictEqual(d.suppressPermissionWhenEditorVisible, true);
+    assert.deepStrictEqual(d.permissionSuppressEditorApps, ["Visual Studio Code"]);
+  });
+
 });
 
 describe("prefs Feishu approval provenance migration", () => {
@@ -571,6 +579,55 @@ describe("prefs.validate", () => {
       prefs.validate({ quotaRingHiddenProviders: flood }).quotaRingHiddenProviders.length,
       prefs.MAX_HIDDEN_QUOTA_PROVIDERS
     );
+  });
+
+  it("backfills editor-visible suppression defaults for snapshots that predate the keys", () => {
+    // fork 个性化：缺键的旧快照 validate 后直接拿到默认值，无需迁移。
+    const v = prefs.validate({ version: 15, lang: "ko" });
+    assert.strictEqual(v.suppressPermissionWhenEditorVisible, true);
+    assert.deepStrictEqual(v.permissionSuppressEditorApps, ["Visual Studio Code"]);
+  });
+
+  it("normalizes the editor-visible suppression app list", () => {
+    // 显式开关值原样保留（合法布尔）。
+    assert.strictEqual(
+      prefs.validate({ suppressPermissionWhenEditorVisible: false }).suppressPermissionWhenEditorVisible,
+      false
+    );
+    assert.strictEqual(
+      prefs.validate({ suppressPermissionWhenEditorVisible: true }).suppressPermissionWhenEditorVisible,
+      true
+    );
+    // 非法开关值回落默认 true。
+    assert.strictEqual(
+      prefs.validate({ suppressPermissionWhenEditorVisible: "yes" }).suppressPermissionWhenEditorVisible,
+      true
+    );
+    // 名单清洗：去空、忽略大小写去重、非字符串丢弃。
+    assert.deepStrictEqual(
+      prefs.validate({
+        permissionSuppressEditorApps: [" Code ", "code", "", "  ", null, 7, "Cursor", "Xcode"],
+      }).permissionSuppressEditorApps,
+      ["Code", "Cursor", "Xcode"]
+    );
+    // 超长条目截断到 64 字符，不整条丢弃。
+    const overlong = "x".repeat(100);
+    const [trimmed] = prefs.validate({ permissionSuppressEditorApps: [overlong] })
+      .permissionSuppressEditorApps;
+    assert.strictEqual(trimmed.length, 64);
+    // 超 32 条截断封顶。
+    const flood = Array.from({ length: 40 }, (_v, i) => `App${i}`);
+    assert.strictEqual(
+      prefs.validate({ permissionSuppressEditorApps: flood }).permissionSuppressEditorApps.length,
+      32
+    );
+    // 垃圾形状（非数组）清洗为空名单，而不是炸掉或写回文件。
+    for (const raw of [undefined, null, "Visual Studio Code", 7, {}]) {
+      assert.deepStrictEqual(
+        prefs.validate({ permissionSuppressEditorApps: raw }).permissionSuppressEditorApps, [],
+        `${JSON.stringify(raw)} should normalize to an empty list`
+      );
+    }
   });
 
   it("normalizes agents (drops malformed entries)", () => {

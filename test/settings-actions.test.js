@@ -254,6 +254,37 @@ describe("updateRegistry pure-data validators", () => {
     );
   });
 
+  it("editor-visible suppression validates a boolean toggle and a bounded app list", () => {
+    // fork 个性化：开关走布尔校验；名单只查形状（数组/非空字符串/条数上限），
+    // 具体名字清洗交给 prefs 侧的 normalizeEditorAppList。
+    const toggle = updateRegistry.suppressPermissionWhenEditorVisible;
+    const checkToggle = (value) => (typeof toggle === "function" ? toggle(value) : toggle.validate(value));
+    assert.strictEqual(checkToggle(true).status, "ok");
+    assert.strictEqual(checkToggle(false).status, "ok");
+    assert.strictEqual(checkToggle("yes").status, "error");
+    assert.strictEqual(checkToggle(1).status, "error");
+    assert.strictEqual(checkToggle(null).status, "error");
+
+    const entry = updateRegistry.permissionSuppressEditorApps;
+    const check = (value) => (typeof entry === "function" ? entry(value) : entry.validate(value));
+    assert.strictEqual(check([]).status, "ok");
+    assert.strictEqual(check(["Visual Studio Code", "Cursor"]).status, "ok");
+    assert.strictEqual(check("Visual Studio Code").status, "error", "a bare string is not a list");
+    assert.strictEqual(check(null).status, "error");
+    assert.strictEqual(check({}).status, "error");
+    assert.strictEqual(check([""]).status, "error");
+    assert.strictEqual(check(["  "]).status, "error");
+    assert.strictEqual(check(["Visual Studio Code", 7]).status, "error");
+    assert.strictEqual(
+      check(Array.from({ length: 33 }, (_v, i) => `App${i}`)).status, "error",
+      "an unbounded list must be refused at the command boundary, not silently truncated"
+    );
+    assert.strictEqual(
+      check(Array.from({ length: 32 }, (_v, i) => `App${i}`)).status, "ok",
+      "32 entries stay within MAX_EDITOR_APP_ENTRIES"
+    );
+  });
+
   it("Claude usage collection validates booleans and delegates the opt-in mutation", async () => {
     const entry = updateRegistry.claudeQuotaCollectionEnabled;
     assert.strictEqual(entry.validate(true).status, "ok");

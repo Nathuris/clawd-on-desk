@@ -201,6 +201,11 @@ function arePermissionBubblesEnabled(ctx) {
   return !ctx.hideBubbles;
 }
 
+function shouldSuppressForVisibleEditor(ctx) {
+  return typeof ctx.shouldSuppressPermissionForVisibleEditor === "function"
+    && ctx.shouldSuppressPermissionForVisibleEditor() === true;
+}
+
 function normalizeString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
@@ -2253,6 +2258,19 @@ function handlePermissionPost(req, res, options) {
         recordRequestHookEvent.accepted();
         ctx.permLog(`PASSTHROUGH: tool=${toolName} session=${sessionId}`);
         ctx.sendPermissionResponse(res, "allow");
+        return;
+      }
+
+      // 名单内编辑器窗口可见时不弹权限气泡（fork 个性化）。
+      // ① 刻意放在 headless 自动拒绝 / PASSTHROUGH 自动放行之后：只拦截「本来会弹窗」的请求，
+      //    不影响这两类已定结果的路径。
+      // ② 不同于 permissionBubblesEnabled=false：这里也不启动 Telegram / 飞书远程确认，
+      //    用户拍板「直接不显示」。
+      // ③ 绝不 allow / deny：res.destroy() 断连后 Claude Code 回落到原生确认界面，由用户自己拍板。
+      if (shouldSuppressForVisibleEditor(ctx)) {
+        recordRequestHookEvent.accepted();
+        ctx.permLog(`editor window visible → destroy connection, native prompt fallback (tool=${toolName})`);
+        res.destroy();
         return;
       }
 

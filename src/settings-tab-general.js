@@ -42,6 +42,9 @@
     "bubbleFollowPreference",
     "bubbleFixedCorner",
     "permissionBubblesEnabled",
+    // fork 个性化：编辑器可见时压制权限气泡的开关。名单数组
+    // permissionSuppressEditorApps 刻意不进这里——保存后整页重渲染即可。
+    "suppressPermissionWhenEditorVisible",
     "notificationBubbleAutoCloseSeconds",
     "updateBubbleAutoCloseSeconds",
     "sessionStaleMs",
@@ -586,6 +589,14 @@
         // the tab by a factor of three.
         descExtraKey: "rowDestructiveActionReminderNote",
       }),
+      // fork 个性化：名单内编辑器窗口可见时不弹权限气泡（默认开启）。
+      helpers.buildSwitchRow({
+        key: "suppressPermissionWhenEditorVisible",
+        labelKey: "rowEditorSuppress",
+        descKey: "rowEditorSuppressDesc",
+        descExtraKey: "rowEditorSuppressNote",
+      }),
+      buildEditorAppsRow(),
     ]));
   }
 
@@ -686,6 +697,132 @@
         suppressFutureConfirmation: result.checkboxChecked === true,
       });
     });
+  }
+
+  // fork 个性化：编辑器名单输入行。仿 settings-ui-core.js 的 buildNumberInputRow
+  // 的提交节奏（约 600ms 防抖、失败 toast + 回退显示），但写成本页本地函数，
+  // 不动公共的 settings-ui-core.js，减少与上游合并时的冲突。
+  // 数组键 permissionSuppressEditorApps 刻意不进 GENERAL_IN_PLACE_KEYS：保存后
+  // 走全量重渲染，输入框在 render() 里按快照重建即可正确显示当前值。
+  const EDITOR_APPS_COMMIT_DELAY_MS = 600;
+  function buildEditorAppsRow() {
+    const row = document.createElement("div");
+    // 复用通用文本输入行样式（agent-text-input-* 只是历史命名，样式是全局的）。
+    row.className = "row agent-text-input-row";
+
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("rowEditorSuppressApps");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t("rowEditorSuppressAppsDesc");
+    text.appendChild(label);
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const ctrl = document.createElement("div");
+    ctrl.className = "row-control agent-text-input-control";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = t("rowEditorSuppressAppsPlaceholder");
+    input.spellcheck = false;
+    // 全量重渲染后靠这个标记把焦点还给输入框（settings-ui-core 的 requestRender）。
+    input.setAttribute("data-settings-focus-key", "general-editor-apps");
+    ctrl.appendChild(input);
+    row.appendChild(ctrl);
+
+    function currentStored() {
+      const value = state.snapshot && state.snapshot.permissionSuppressEditorApps;
+      return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+    }
+    function renderValue() {
+      input.value = currentStored().join(", ");
+    }
+    function parseInput() {
+      return input.value
+        .split(",")
+        .map((item) => item.trim())
+        .filter((item) => item !== "");
+    }
+    function sameList(a, b) {
+      return a.length === b.length && a.every((item, i) => item === b[i]);
+    }
+    renderValue();
+
+    let commitTimer = null;
+    let commitSeq = 0;
+    let inFlightList = null;
+    function clearCommitTimer() {
+      if (commitTimer) {
+        clearTimeout(commitTimer);
+        commitTimer = null;
+      }
+    }
+    function revert() {
+      renderValue();
+    }
+    function commit(list) {
+      const seq = ++commitSeq;
+      inFlightList = list;
+      return window.settingsAPI.update("permissionSuppressEditorApps", list).then((result) => {
+        if (seq !== commitSeq) return;
+        inFlightList = null;
+        if (!result || result.status !== "ok") {
+          const msg = (result && result.message) || "unknown error";
+          ops.showToast(t("toastSaveFailed") + msg, { error: true });
+          revert();
+        }
+      }).catch((err) => {
+        if (seq !== commitSeq) return;
+        inFlightList = null;
+        ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+        revert();
+      });
+    }
+    function commitFromInput() {
+      const list = parseInput();
+      if (inFlightList && sameList(list, inFlightList)) {
+        // 同一份名单已在写入途中：不重复写入，也不要动输入框（快照还是旧值）。
+        return;
+      }
+      if (sameList(list, currentStored())) {
+        // 没有实际变化：只把输入框整理成存储形态，不发写入。
+        renderValue();
+        return;
+      }
+      void commit(list);
+    }
+    function scheduleCommit() {
+      clearCommitTimer();
+      commitTimer = setTimeout(() => {
+        commitTimer = null;
+        // 输入行可能已被全量重渲染换掉，残留定时器不再提交。
+        if (!input.isConnected) return;
+        commitFromInput();
+      }, EDITOR_APPS_COMMIT_DELAY_MS);
+    }
+
+    input.addEventListener("input", scheduleCommit);
+    input.addEventListener("blur", () => {
+      clearCommitTimer();
+      commitFromInput();
+    });
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        clearCommitTimer();
+        commitFromInput();
+        input.blur();
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        clearCommitTimer();
+        revert();
+        input.blur();
+      }
+    });
+    return row;
   }
 
   function buildPermissionAutomationRow() {

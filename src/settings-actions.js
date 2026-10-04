@@ -83,6 +83,7 @@ const {
   sessionAliasKey,
 } = require("./session-alias");
 const { validateShortcutMapShape } = require("./shortcut-actions");
+const { MAX_EDITOR_APP_ENTRIES } = require("./editor-window-visibility");
 const {
   requireBoolean,
   requireFiniteNumber,
@@ -461,6 +462,25 @@ const updateRegistry = {
   sessionHudPinned: requireBoolean("sessionHudPinned"),
   hideBubbles: requireBoolean("hideBubbles"),
   permissionBubblesEnabled: requireBoolean("permissionBubblesEnabled"),
+  // fork 个性化：名单内编辑器可见时压制权限气泡（默认开启）。
+  suppressPermissionWhenEditorVisible: requireBoolean("suppressPermissionWhenEditorVisible"),
+  // 形状校验（同 quotaRingHiddenProviders）：只检查数组/条数上限/非空字符串，
+  // 具体名字清洗交给 prefs 侧的 normalizeEditorAppList。
+  permissionSuppressEditorApps(value) {
+    if (!Array.isArray(value)) {
+      return { status: "error", message: "permissionSuppressEditorApps must be an array" };
+    }
+    if (value.length > MAX_EDITOR_APP_ENTRIES) {
+      return {
+        status: "error",
+        message: `permissionSuppressEditorApps must contain at most ${MAX_EDITOR_APP_ENTRIES} entries`,
+      };
+    }
+    if (value.some((entry) => typeof entry !== "string" || !entry.trim())) {
+      return { status: "error", message: "permissionSuppressEditorApps must contain non-empty strings" };
+    }
+    return { status: "ok" };
+  },
   destructiveActionReminder: requireBoolean("destructiveActionReminder"),
   // Permission automation is safety-sensitive: the command path owns its
   // warning/confirmation gate and the coupled mode + dismissal commit. Keep
