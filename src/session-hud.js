@@ -23,6 +23,7 @@ const { BrowserWindow, screen } = require("electron");
 const path = require("path");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { clampTextScale, scaleHeight, applyZoomToWindow } = require("./text-scale");
+const { decideReplyWindowVisibility } = require("./reply-window-autohide");
 const ringGeom = require("./quota-ring-geometry");
 
 const isLinux = process.platform === "linux";
@@ -286,6 +287,11 @@ module.exports = function initSessionHud(ctx) {
   let revealed = false;
   const holdReasons = new Set();
   let visibleHoldUntil = 0;
+  // 回复窗口的自动消失状态：replyRevealed = 我们让它显示；replyHoldUntil =
+  // 宽限/「刚回复完」的停留截止时间；replyWasBusy 用来识别「回复刚结束」这个边沿。
+  let replyRevealed = false;
+  let replyHoldUntil = 0;
+  let replyWasBusy = false;
   // 二级设置菜单（权限模式 + effort 滑块）是否展开：展开时卡片更高，
   // 且 holdReasons 里钉一个 "menu" 让面板不被自动收起。
   let expanded = false;
@@ -338,8 +344,15 @@ module.exports = function initSessionHud(ctx) {
     if (ctx.petHidden) return false;
     if (getMiniMode() || getMiniTransitioning()) return false;
     if (ctx.lowPowerIdleMode) return false;
+    // 回复窗口的自动消失也要靠这次轮询（它是普通窗口，宠物藏了/省电模式下
+    // 不该继续轮询）。
+    if (isReplyWindowOpen()) return true;
     if (ctx.sessionHudPinned === true) return false;
     return revealed === true;
+  }
+
+  function isReplyWindowOpen() {
+    return typeof ctx.isReplyWindowOpen === "function" && ctx.isReplyWindowOpen() === true;
   }
 
   // 发送等动作刚发生：收起面板（视线转移到弹出的对话窗口上）。
@@ -467,8 +480,20 @@ module.exports = function initSessionHud(ctx) {
       : { x: 0, y: 0, width: 1280, height: 800 };
     const widthScale = getBlockWidthScale(scale);
 
+    // 「一条」版式：回复窗口开着时，它贴在卡片正上方，两者合起来才是一个整体。
+    // 卡片整体下移 回复窗口高度/2，好让「窗口 + 卡片」这条竖条以桌宠为中心，
+    // 否则 680 高的窗口在普通屏幕上总是顶到屏幕外、把卡片压住。
+    const attachedHeight = getAttachedReplyHeight();
+    const stackedAnchorRect = attachedHeight > 0 && anchorRect
+      ? {
+        ...anchorRect,
+        top: anchorRect.top + attachedHeight / 2,
+        bottom: anchorRect.bottom + attachedHeight / 2,
+      }
+      : anchorRect;
+
     const panelLayout = computeBlockBounds({
-      hitRect, anchorRect, workArea,
+      hitRect, anchorRect: stackedAnchorRect, workArea,
       cardW: QUICK_CARD.width,
       cardH: expanded ? QUICK_CARD_EXPANDED.height : QUICK_CARD.height,
       // 展开态以收起态的底边为基准向上长（只向上延伸，不向下撑）
@@ -508,14 +533,26 @@ module.exports = function initSessionHud(ctx) {
     return false;
   }
 
-  // 只在「已揭示」时被轮询调用，职责是盯收起：指针离开热区 + 宽限期、
-  // 或动作互斥命中。
+  // 回复窗口刚开 / 刚关时收敛状态：刚开先给一段宽限，别让它在消息还在排队的
+  // 那一瞬间就被判成「该收了」；关掉后把「应为显示」复位，下次开窗重新开始。
+  function noteReplyWindowStateChanged(open) {
+    if (open === true) {
+      replyRevealed = true;
+      replyHoldUntil = Date.now() + HIDE_GRACE_MS;
+      return;
+    }
+    replyRevealed = false;
+    replyHoldUntil = 0;
+    replyWasBusy = false;
+  }
+
+  // 只在需要盯收起时被轮询调用：面板自动收起（指针离开热区 + 宽限期、或动作
+  // 互斥命中）与回复窗口的自动消失共用这一次光标采样。
   function evaluateAutoHideCursorNow({ syncOnChange = true } = {}) {
     if (!isAutoHidePollingNeeded()) {
       stopAutoHidePoll();
       return false;
     }
-    if (!revealed) return false;
     let cursor = null;
     try {
       cursor = screen.getCursorScreenPoint();
@@ -530,7 +567,13 @@ module.exports = function initSessionHud(ctx) {
     if (cursor) {
       const hotZone = computeAutoHideHotZone({
         petHitRect: expected && expected.hitRect,
-        contentBoundsList: [expected && expected.panel && expected.panel.contentBounds],
+        // 「一条」版式下面板被推到底部、桌宠挪到了回复窗口旁边，鼠标从面板移到
+        // 桌宠/窗口的路上会经过回复窗口——把它的矩形也算进热区，面板才不会
+        // 因为「指针离开了面板」而提前收回去。
+        contentBoundsList: [
+          expected && expected.panel && expected.panel.contentBounds,
+          getAttachedReplyRect(),
+        ],
         expectedRingContentBounds: expected && expected.ringContentBounds,
         pad: Math.round(HOT_ZONE_PAD * scale),
       });
@@ -548,6 +591,15 @@ module.exports = function initSessionHud(ctx) {
     }
     const now = Date.now();
 
+    let changed = false;
+    if (syncPanelAutoHide({ inHotZone, now, syncOnChange })) changed = true;
+    if (syncReplyWindowAutoHide({ inHotZone, now })) changed = true;
+    return changed;
+  }
+
+  // 面板的自动收起（只在已揭示时才需要看）。
+  function syncPanelAutoHide({ inHotZone, now, syncOnChange }) {
+    if (!revealed) return false;
     if (isRevealBlocked()) {
       revealed = false;
       visibleHoldUntil = 0;
@@ -571,6 +623,37 @@ module.exports = function initSessionHud(ctx) {
       return true;
     }
     return false;
+  }
+
+  // 回复窗口的自动消失：和面板同款「离开热区 + 宽限」，另有焦点 / 正在回复 /
+  // 刚回复完三种保活（判定写在 reply-window-autohide.js，这里只负责采样与通知）。
+  function syncReplyWindowAutoHide({ inHotZone, now }) {
+    const open = typeof ctx.isReplyWindowOpen === "function" && ctx.isReplyWindowOpen();
+    const busy = open && typeof ctx.isReplyBusy === "function" && ctx.isReplyBusy() === true;
+    const result = decideReplyWindowVisibility({
+      open,
+      busy,
+      wasBusy: replyWasBusy,
+      pointerInHotZone: inHotZone,
+      // 留着草稿或正在输入时也算「人在用」：窗口别在打字中途消失。
+      focused: holdReasons.size > 0
+        || (typeof ctx.isReplyWindowFocused === "function" && ctx.isReplyWindowFocused() === true),
+      now,
+      holdUntil: replyHoldUntil,
+      hideGraceMs: HIDE_GRACE_MS,
+    });
+    replyWasBusy = busy;
+    replyHoldUntil = result.nextHoldUntil;
+    if (result.show === replyRevealed) return false;
+    replyRevealed = result.show;
+    if (typeof ctx.onReplyVisibilityChanged === "function") {
+      try {
+        ctx.onReplyVisibilityChanged(result.show);
+      } catch (err) {
+        console.warn("Clawd: reply window visibility callback failed:", err && err.message);
+      }
+    }
+    return true;
   }
 
   function pollAutoHideCursor() {
@@ -1095,6 +1178,54 @@ module.exports = function initSessionHud(ctx) {
     if (typeof ctx.onReservedOffsetChange === "function") ctx.onReservedOffsetChange();
   }
 
+  // 回复窗口跟随时的高度（0 = 没开窗口、或不在跟随模式）。面板据此给整条让位：
+  // 卡片整体下移「回复窗口高度 / 2」，让「窗口 + 卡片」这条竖条以桌宠为中心。
+  function getAttachedReplyHeight() {
+    if (typeof ctx.getAttachedReplyHeight !== "function") return 0;
+    try {
+      const height = Number(ctx.getAttachedReplyHeight());
+      return Number.isFinite(height) && height > 0 ? height : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  // 回复窗口自己的屏幕矩形（跟随模式下和面板是同一条）；没开窗口时 null。
+  function getAttachedReplyRect() {
+    if (typeof ctx.getAttachedReplyRect !== "function") return null;
+    try {
+      const rect = ctx.getAttachedReplyRect();
+      if (
+        rect
+        && Number.isFinite(rect.x)
+        && Number.isFinite(rect.y)
+        && Number.isFinite(rect.width)
+        && rect.width > 0
+        && Number.isFinite(rect.height)
+        && rect.height > 0
+      ) {
+        return rect;
+      }
+    } catch {}
+    return null;
+  }
+
+  // 回复窗口的定位基准：面板「收起态卡片」的屏幕矩形。
+  // 与面板当前是否可见无关（收起只是把窗口藏起来，位置照旧），也不随展开菜单
+  // 变化——展开的菜单会临时盖住上面的回复窗口，卡片收起态的底边才是那条固定的线。
+  function getPanelCardRect() {
+    const layout = computeExpectedLayout();
+    const content = layout && layout.panel && layout.panel.contentBounds;
+    if (!content) return null;
+    const cardHeight = Math.ceil(QUICK_CARD.height * getTextScale());
+    return {
+      x: content.x,
+      y: Math.round(content.y + content.height - cardHeight),
+      width: content.width,
+      height: cardHeight,
+    };
+  }
+
   // 可见面板的窗口矩形（供气泡避让读取；main 侧 getVisibleSessionHudBounds）。
   function getBlockRects() {
     const rects = [];
@@ -1210,6 +1341,8 @@ module.exports = function initSessionHud(ctx) {
     sendI18n,
     getHudReservedOffset,
     getBlockRects,
+    getPanelCardRect,
+    noteReplyWindowStateChanged,
     cleanup,
     getWindow: () => panel.win,
     // 面板窗口给 topmost-runtime 做 mac 层级/跨 Space 处理（数组形状保持兼容）。

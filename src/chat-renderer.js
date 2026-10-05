@@ -41,53 +41,17 @@
     denied: "chatToolDenied",
     error: "chatToolError",
   };
-  const EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"];
-  const EFFORT_LABEL_KEYS = {
-    low: "chatEffortLow",
-    medium: "chatEffortMedium",
-    high: "chatEffortHigh",
-    xhigh: "chatEffortXhigh",
-    max: "chatEffortMax",
-  };
-  const MODE_VALUES = ["default", "acceptEdits", "plan", "auto"];
-  const MODE_LABEL_KEYS = {
-    default: "chatModeDefault",
-    acceptEdits: "chatModeAcceptEdits",
-    plan: "chatModePlan",
-    auto: "chatModeAuto",
-  };
-
-  // 斜杠指令：state.commands 为空时用的内置兜底（名字固定，描述走 i18n 键）。
-  const BUILTIN_COMMANDS = [
-    { name: "/compact", description: "chatCmdCompactDesc" },
-    { name: "/clear", description: "chatCmdClearDesc" },
-    { name: "/help", description: "chatCmdHelpDesc" },
-  ];
-  const COMMAND_LIMIT = 8;      // 弹层最多显示的候选条数
-  const THUMB_MAX_SIDE = 96;    // 发送前图片压缩后的最长边（px）
   const DIFF_PREVIEW_LINES = 6;   // 工具卡片 diff 折叠时显示的行数
   const COPY_FEEDBACK_MS = 1400;  // 代码块「已复制」反馈的停留时长
-  const SVG_NS = "http://www.w3.org/2000/svg";
-  // 纯线条图标（Feather 风格路径），避免依赖字体 emoji。
-  const PAPERCLIP_PATHS = [
-    "M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48",
-  ];
-  const FILE_ICON_PATHS = ["M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z", "M13 2v7h7"];
 
   let lang = null;             // 当前渲染语言（en/zh/zh-TW/ko/ja/pt-BR/es）
   let state = null;            // 最近一次应用的状态快照
   let hasAppliedState = false; // 是否已应用过任何快照（防止 getState 的迟到旧值覆盖推送）
   let localErrorSeq = 0;
-  let resumePending = false;   // 正在恢复历史会话：invoke 落地前本窗口禁用输入
+  let resumePending = false;   // 正在恢复历史会话：期间显示为忙（停止按钮可见）
   let historyStatus = null;    // 历史浮层状态：loading / empty / error / list
   let historyRows = [];        // 最近一次成功加载的历史列表
   let historyLoadSeq = 0;      // 在途加载序号：关闭或重开浮层后丢弃过期结果
-  let commandsCache = [];      // chatAPI.listCommands() 的结果（state 推送为空时兜底）
-  let commandMatches = [];     // 弹层当前显示的候选（已截断到 COMMAND_LIMIT）
-  let commandIndex = 0;        // 键盘选中的候选下标
-  let dragDepth = 0;           // 文件拖拽进出计数：>0 时显示拖拽高亮
-  let sendPending = false;     // send invoke 在途：防连点重复提交
-  const trayItems = [];        // 待发送附件：{path,name,size,isImage,sourceUrl,file}
   const localErrors = [];      // 渲染端自身操作失败（invoke 异常）产生的提示
   const entries = new Map();   // 消息 id → 已渲染节点信息（增量更新用）
 
@@ -181,12 +145,6 @@
     return tail ? "…/" + tail : p;
   }
 
-  function basenameOf(p) {
-    if (typeof p !== "string" || !p) return "";
-    const parts = p.split(/[\\/]/).filter(Boolean);
-    return parts.length ? parts[parts.length - 1] : p;
-  }
-
   // 附件大小：B / KB / MB / GB 自适应，小数值保留一位小数。
   function formatSize(bytes) {
     const n = Number(bytes);
@@ -198,35 +156,6 @@
     if (mb < 1024) return (mb < 10 ? mb.toFixed(1) : String(Math.round(mb))) + " MB";
     const gb = mb / 1024;
     return (gb < 10 ? gb.toFixed(1) : String(Math.round(gb))) + " GB";
-  }
-
-  function svgIcon(paths, className) {
-    const svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("viewBox", "0 0 24 24");
-    svg.setAttribute("fill", "none");
-    svg.setAttribute("stroke", "currentColor");
-    svg.setAttribute("stroke-width", "2");
-    svg.setAttribute("stroke-linecap", "round");
-    svg.setAttribute("stroke-linejoin", "round");
-    svg.setAttribute("aria-hidden", "true");
-    if (className) svg.setAttribute("class", className);
-    for (const d of paths) {
-      const path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("d", d);
-      svg.appendChild(path);
-    }
-    return svg;
-  }
-
-  // 判断一次拖拽是否带着文件（纯文字拖拽不接管）。
-  function isFileDrag(event) {
-    const dt = event && event.dataTransfer;
-    const types = dt && dt.types;
-    if (!types) return false;
-    for (let i = 0; i < types.length; i += 1) {
-      if (types[i] === "Files") return true;
-    }
-    return false;
   }
 
   // ── Markdown 子集渲染 ──────────────────────────────────
@@ -505,42 +434,6 @@
     // 顶部工具条：工作目录 / 思考强度 / 权限模式 / 新会话
     const toolbar = el("header", "chat-toolbar");
 
-    const dirGroup = el("div", "chat-toolbar-group chat-dir-group");
-    els.dirLabel = el("span", "chat-field-label");
-    els.dirButton = el("button", "chat-dir-button");
-    els.dirButton.type = "button";
-    els.dirButton.addEventListener("click", () => callApi("pickWorkingDir"));
-    dirGroup.appendChild(els.dirLabel);
-    dirGroup.appendChild(els.dirButton);
-
-    const effortGroup = el("div", "chat-toolbar-group");
-    els.effortLabel = el("span", "chat-field-label");
-    els.effortSelect = el("select", "chat-select chat-effort-select");
-    els.effortOptions = new Map();
-    for (const value of EFFORT_VALUES) {
-      const option = el("option", "", "");
-      option.value = value;
-      els.effortOptions.set(value, option);
-      els.effortSelect.appendChild(option);
-    }
-    els.effortSelect.addEventListener("change", () => callApi("setEffort", els.effortSelect.value));
-    effortGroup.appendChild(els.effortLabel);
-    effortGroup.appendChild(els.effortSelect);
-
-    const modeGroup = el("div", "chat-toolbar-group");
-    els.modeLabel = el("span", "chat-field-label");
-    els.modeSelect = el("select", "chat-select chat-mode-select");
-    els.modeOptions = new Map();
-    for (const value of MODE_VALUES) {
-      const option = el("option", "", "");
-      option.value = value;
-      els.modeOptions.set(value, option);
-      els.modeSelect.appendChild(option);
-    }
-    els.modeSelect.addEventListener("change", () => callApi("setPermissionMode", els.modeSelect.value));
-    modeGroup.appendChild(els.modeLabel);
-    modeGroup.appendChild(els.modeSelect);
-
     els.newSessionButton = el("button", "chat-new-session-button");
     els.newSessionButton.type = "button";
     els.newSessionButton.addEventListener("click", () => {
@@ -570,13 +463,26 @@
     els.historyWrap.appendChild(els.historyButton);
     els.historyWrap.appendChild(els.historyPopover);
 
+    // 「显示我的消息」：默认隐藏自己的消息，点一下显示/再点隐藏
+    els.showUserButton = el("button", "chat-show-user-button");
+    els.showUserButton.type = "button";
+    els.showUserButton.setAttribute("aria-pressed", "false");
+    els.showUserButton.addEventListener("click", () => {
+      callApi("setShowUserMessages", !(state && state.showUserMessages === true));
+    });
+
+    // 「停止」：从原输入区搬到工具栏，会话进行中才出现
+    els.stopButton = el("button", "chat-stop-button");
+    els.stopButton.type = "button";
+    els.stopButton.hidden = true;
+    els.stopButton.addEventListener("click", () => callApi("stop"));
+
     const actions = el("div", "chat-toolbar-actions");
     actions.appendChild(els.historyWrap);
     actions.appendChild(els.newSessionButton);
+    actions.appendChild(els.showUserButton);
+    actions.appendChild(els.stopButton);
 
-    toolbar.appendChild(dirGroup);
-    toolbar.appendChild(effortGroup);
-    toolbar.appendChild(modeGroup);
     toolbar.appendChild(actions);
 
     // 点浮层外面 / 按 Esc 关闭历史列表
@@ -588,13 +494,6 @@
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !els.historyPopover.hidden) closeHistoryPopover();
-    });
-    // 点指令弹层和输入框以外的区域时关闭弹层
-    document.addEventListener("click", (event) => {
-      if (els.commandPopover.hidden) return;
-      const target = event.target;
-      if (target === els.input || (target && els.commandPopover.contains(target))) return;
-      closeCommandPopover();
     });
 
     // 状态栏
@@ -619,140 +518,10 @@
     els.scroll.appendChild(els.empty);
     els.scroll.appendChild(els.messages);
 
-    // 输入区
-    els.form = el("form", "chat-composer");
-    els.attachButton = el("button", "chat-attach-button");
-    els.attachButton.type = "button";
-    els.attachButton.appendChild(svgIcon(PAPERCLIP_PATHS));
-    els.attachButton.addEventListener("click", () => pickAttachments());
-    els.input = el("textarea", "chat-input");
-    els.input.rows = 1;
-    els.input.addEventListener("input", () => {
-      autosizeInput();
-      updateComposer();
-      updateCommands();
-    });
-    els.input.addEventListener("keydown", (event) => {
-      // 指令弹层打开时先消化方向键 / 回车 / Esc
-      if (!els.commandPopover.hidden && handleCommandKeydown(event)) return;
-      // 输入框内按 Esc：正在生成时停止；指令弹层的 Esc 已在上面优先处理，
-      // 历史浮层开着时把 Esc 留给 document 上的既有监听（只关浮层）。
-      if (event.key === "Escape") {
-        if (els.historyPopover.hidden && !event.defaultPrevented && isBusy()) {
-          event.preventDefault();
-          callApi("stop");
-        }
-        return;
-      }
-      if (event.key !== "Enter" || event.shiftKey) return;
-      // 中文等输入法组合期间的回车只用于选词，不发送（keyCode 229 是 IME 兼容判断）
-      if (event.isComposing || event.keyCode === 229) return;
-      event.preventDefault();
-      submitInput();
-    });
-    // 粘贴板里有图片：转 data URL 交给主进程落盘，成功进附件托盘；
-    // 只有图片粘贴才接管，纯文本粘贴完全不受影响。
-    els.input.addEventListener("paste", (event) => {
-      const items = event && event.clipboardData && event.clipboardData.items
-        ? Array.prototype.slice.call(event.clipboardData.items)
-        : [];
-      const imageItems = items.filter(
-        (item) => item && item.kind === "file" && typeof item.type === "string" && item.type.indexOf("image/") === 0,
-      );
-      if (!imageItems.length) return;
-      event.preventDefault();
-      for (const item of imageItems) {
-        const file = typeof item.getAsFile === "function" ? item.getAsFile() : null;
-        if (!file) continue;
-        savePastedImageFile(file).catch((err) => {
-          console.warn("chat: paste failed", err);
-          addLocalError(t("chatPasteFailed"));
-        });
-      }
-    });
-    els.sendButton = el("button", "chat-send-button");
-    els.sendButton.type = "submit";
-    els.stopButton = el("button", "chat-stop-button");
-    els.stopButton.type = "button";
-    els.stopButton.hidden = true;
-    els.stopButton.addEventListener("click", () => callApi("stop"));
-    els.form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      submitInput();
-    });
-
-    // 斜杠指令弹层：绝对定位在输入框上方，属于 form 但不参与 flex 布局
-    els.commandPopover = el("div", "chat-command-popover");
-    els.commandPopover.hidden = true;
-    els.commandPopover.setAttribute("role", "listbox");
-    els.commandList = el("div", "chat-command-list");
-    els.commandPopover.appendChild(els.commandList);
-    // 点弹层时不抢走输入框焦点（否则 click 前先触发 blur）
-    els.commandPopover.addEventListener("mousedown", (event) => event.preventDefault());
-
-    els.form.appendChild(els.attachButton);
-    els.form.appendChild(els.input);
-    els.form.appendChild(els.sendButton);
-    els.form.appendChild(els.stopButton);
-    els.form.appendChild(els.commandPopover);
-
-    els.hint = el("div", "chat-composer-hint", "");
-    els.hint.hidden = true;
-
-    // 附件托盘：与提示条同在输入框上方（CSS 用 order 排到 form 之前）
-    els.tray = el("div", "chat-attach-tray");
-    els.tray.hidden = true;
-    els.tray.setAttribute("role", "list");
-    els.tray.setAttribute("aria-label", "");
-
-    // 拖拽文件时的整窗高亮提示
-    els.dropOverlay = el("div", "chat-drop-overlay");
-    els.dropOverlay.hidden = true;
-    els.dropText = el("div", "chat-drop-hint-text", "");
-    els.dropOverlay.appendChild(els.dropText);
-
+    // 回复窗口只展示输出：输入框、附件、拖放、斜杠指令都搬到了桌宠面板。
     els.app.appendChild(toolbar);
     els.app.appendChild(els.statusBar);
     els.app.appendChild(els.scroll);
-    els.app.appendChild(els.form);
-    els.app.appendChild(els.hint);
-    els.app.appendChild(els.tray);
-    els.app.appendChild(els.dropOverlay);
-
-    // 文件拖进窗口：显示 / 收起高亮，drop 时登记路径并加入托盘
-    document.addEventListener("dragenter", (event) => {
-      if (!isFileDrag(event)) return;
-      event.preventDefault();
-      dragDepth += 1;
-      setDropHint(true);
-    });
-    document.addEventListener("dragover", (event) => {
-      if (!isFileDrag(event)) return;
-      event.preventDefault();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
-      if (els.dropOverlay.hidden) setDropHint(true);
-    });
-    // dragleave 在子元素之间也会触发，用计数进出成对抵消；
-    // 这里不再检查 types（个别平台在 leave 时已拿不到 Files）。
-    document.addEventListener("dragleave", () => {
-      if (!dragDepth) return;
-      dragDepth -= 1;
-      if (dragDepth <= 0) {
-        dragDepth = 0;
-        setDropHint(false);
-      }
-    });
-    document.addEventListener("dragend", () => {
-      dragDepth = 0;
-      setDropHint(false);
-    });
-    document.addEventListener("drop", (event) => {
-      if (!isFileDrag(event)) return;
-      event.preventDefault();
-      dragDepth = 0;
-      setDropHint(false);
-      handleFileDrop(event);
-    });
 
     if (mount !== document.body && mount.childNodes.length > 0) mount.textContent = "";
     mount.appendChild(els.app);
@@ -762,41 +531,14 @@
 
   function refreshStaticText() {
     document.title = t("chatTitle");
-    els.dirLabel.textContent = t("chatDirLabel");
-    els.effortLabel.textContent = t("chatEffortLabel");
-    els.modeLabel.textContent = t("chatModeLabel");
     els.newSessionButton.textContent = t("chatNewSession");
     els.historyButton.textContent = t("chatHistoryButton");
     els.historyButton.setAttribute("aria-label", t("chatHistoryButton"));
-    els.sendButton.textContent = t("chatSend");
     els.stopButton.textContent = t("chatStop");
-    els.input.placeholder = t("chatInputPlaceholder");
-    els.input.setAttribute("aria-label", t("chatInputPlaceholder"));
     els.empty.textContent = t("chatEmptyHint");
-    els.hint.textContent = t("chatNoDirHint");
-    els.attachButton.setAttribute("aria-label", t("chatAttachButton"));
-    els.attachButton.title = t("chatAttachButton");
-    els.tray.setAttribute("aria-label", t("chatAttachmentLabel"));
-    els.dropText.textContent = t("chatDropHint");
-    for (const value of EFFORT_VALUES) {
-      els.effortOptions.get(value).textContent = t(EFFORT_LABEL_KEYS[value]);
-    }
-    for (const value of MODE_VALUES) {
-      els.modeOptions.get(value).textContent = t(MODE_LABEL_KEYS[value]);
-    }
-    // 浮层开着 / 托盘非空时切换语言：重建文案（移除按钮 aria、指令描述等）
+    applyShowUserButtonText();
+    // 浮层开着时切换语言：重建文案（相对时间、移除按钮 aria 等）
     refreshHistoryPopover();
-    renderTray();
-    if (!els.commandPopover.hidden) renderCommandItems();
-  }
-
-  function applyToolbar() {
-    const cwd = state && typeof state.cwd === "string" ? state.cwd : "";
-    els.dirButton.textContent = cwd ? shortenPath(cwd) : t("chatPickDir");
-    els.dirButton.title = cwd || t("chatPickDir");
-    els.dirButton.classList.toggle("has-dir", !!cwd);
-    if (state && EFFORT_VALUES.includes(state.effort)) els.effortSelect.value = state.effort;
-    if (state && MODE_VALUES.includes(state.permissionMode)) els.modeSelect.value = state.permissionMode;
   }
 
   function applyStatus() {
@@ -804,30 +546,36 @@
     els.statusBar.dataset.status = status;
     els.statusBar.classList.toggle("busy", !!(state && state.busy));
     els.statusText.textContent = t(STATUS_KEYS[status] || "chatStatusIdle");
+    els.stopButton.hidden = !isBusy();
     applyStatusMeta();
   }
 
-  // 会话是否进行中（恢复历史会话期间也算，复用同一套禁用/视觉/停止逻辑）
+  // 会话是否进行中（恢复历史会话期间也算，复用同一套视觉/停止逻辑）
   function isBusy() {
     return !!(state && state.busy) || resumePending;
   }
 
-  function updateComposer() {
-    const hasDir = !!(state && state.cwd);
-    const busy = isBusy();
-    const sending = busy || sendPending;
-    els.input.disabled = !hasDir;
-    // 只有附件、没有文字也能发送（文本与附件都为空才禁用）
-    const hasPayload = !!els.input.value.trim() || trayItems.length > 0;
-    els.sendButton.disabled = sending || !hasDir || !hasPayload;
-    els.stopButton.hidden = !busy;
-    els.attachButton.disabled = !hasDir || sending;
-    els.hint.hidden = !state || hasDir;
+  // 「显示我的消息」按钮：文案表达"点下去会做什么"，激活态表示当前正在显示
+  function applyShowUserButtonText() {
+    const showing = !!(state && state.showUserMessages === true);
+    els.showUserButton.textContent = t(showing ? "chatHideUserMessages" : "chatShowUserMessages");
+    els.showUserButton.setAttribute("aria-label", t(showing ? "chatHideUserMessages" : "chatShowUserMessages"));
+    els.showUserButton.setAttribute("aria-pressed", showing ? "true" : "false");
+    els.showUserButton.classList.toggle("active", showing);
   }
 
-  function autosizeInput() {
-    els.input.style.height = "auto";
-    els.input.style.height = Math.min(els.input.scrollHeight, 160) + "px";
+  // 隐藏自己的消息用 CSS 类实现（DOM 保留：工具卡片展开态、滚动锚点都不受影响）
+  function applyShowUserMessages(forceScroll) {
+    const showing = !!(state && state.showUserMessages === true);
+    const wasHidden = els.app.classList.contains("chat-hide-user");
+    els.app.classList.toggle("chat-hide-user", !showing);
+    applyShowUserButtonText();
+    if (wasHidden === !showing) return;
+    // 内容高度变了：贴底时保持贴底；正在读旧消息则不动，别打断
+    if (forceScroll === true || isNearBottom()) {
+      const box = scrollBox();
+      if (box) box.scrollTop = box.scrollHeight;
+    }
   }
 
   // ── 消息渲染（按 id 增量调和）───────────────────────────
@@ -1219,7 +967,10 @@
       }
     }
 
-    els.empty.hidden = list.length > 0;
+    // 空态按「过滤掉被隐藏的用户消息后还剩什么」判断（DOM 仍是全量渲染）
+    const showUser = !!(state && state.showUserMessages === true);
+    const visibleCount = list.filter((m) => showUser || shapeOf(m || {}) !== "text-user").length;
+    els.empty.hidden = visibleCount > 0;
     if (stick) {
       const box = scrollBox();
       if (box) box.scrollTop = box.scrollHeight;
@@ -1236,12 +987,11 @@
     lang = nextLang;
     state = snapshot;
     if (langChanged) refreshStaticText();
-    applyToolbar();
     applyStatus();
-    updateComposer();
-    // state.commands 由主进程推送，可能在弹层开着时更新
-    if (!els.commandPopover.hidden) updateCommands();
+    applyShowUserMessages();
     renderMessages(false);
+    // 开合开关后若原本贴底，保持贴底（隐藏用户消息会改变内容高度）
+    applyShowUserMessages(true);
   }
 
   function callApi(method, ...args) {
@@ -1387,7 +1137,7 @@
       return;
     }
     resumePending = true;
-    updateComposer();
+    applyStatus();
     try {
       const result = await api.resumeSession(historyKey);
       if (result && result.status === "error") {
@@ -1398,485 +1148,8 @@
       addLocalError(errorText(err));
     } finally {
       resumePending = false;
-      updateComposer();
+      applyStatus();
     }
-  }
-
-  function restoreDraft(text) {
-    // 发送失败就把用户输入还回去，避免打字内容丢失（已有新输入时不覆盖）
-    if (!els.input.value && text) {
-      els.input.value = text;
-      autosizeInput();
-    }
-  }
-
-  // send 正常时返回的是状态快照（一定带 messages 数组）；错误响应形如
-  // {status:"error", message}，没有 messages 字段。
-  function isSendFailure(result) {
-    if (result === false) return true;
-    if (!result || typeof result !== "object") return false;
-    if (result.ok === false) return true;
-    return result.status === "error" && !Array.isArray(result.messages);
-  }
-
-  function sendErrorMessage(result) {
-    if (result && typeof result.message === "string" && result.message) return result.message;
-    return t("chatStatusError");
-  }
-
-  async function submitInput() {
-    if (sendPending) return;
-    const text = els.input.value.trim();
-    const items = trayItems.slice();
-    if (!text && !items.length) return;
-    const hasDir = !!(state && state.cwd);
-    if (!hasDir || isBusy()) return;
-    const api = root.chatAPI;
-    if (!api || typeof api.send !== "function") {
-      console.warn("chat: chatAPI.send is unavailable");
-      addLocalError("chatAPI.send is unavailable");
-      return;
-    }
-    sendPending = true;
-    els.input.value = "";
-    autosizeInput();
-    closeCommandPopover();
-    updateComposer();
-    let result;
-    try {
-      const attachments = await buildAttachmentPayload(items);
-      result = await api.send(text, attachments);
-    } catch (err) {
-      console.warn("chat: send failed", err);
-      sendPending = false;
-      restoreDraft(text);
-      updateComposer();
-      addLocalError(errorText(err));
-      return;
-    }
-    sendPending = false;
-    if (isSendFailure(result)) {
-      // 失败保留托盘，报错把输入还回去
-      restoreDraft(text);
-      updateComposer();
-      addLocalError(sendErrorMessage(result));
-      return;
-    }
-    // 成功：只清掉本次真正发出去的托盘项，保留等待期间新加的附件
-    for (const item of items) {
-      const index = trayItems.indexOf(item);
-      if (index >= 0) trayItems.splice(index, 1);
-    }
-    renderTray();
-    updateComposer();
-  }
-
-  // ── 附件托盘 / 拖拽 / 缩略图 ────────────────────────────
-
-  function renderTray() {
-    els.tray.textContent = "";
-    els.tray.hidden = trayItems.length === 0;
-    for (const item of trayItems) {
-      const chip = el("div", "chat-attach-chip");
-      chip.setAttribute("role", "listitem");
-      if (item.isImage && item.sourceUrl) {
-        const img = el("img", "chat-attach-thumb");
-        img.src = item.sourceUrl;
-        img.alt = "";
-        chip.appendChild(img);
-      } else {
-        chip.appendChild(svgIcon(FILE_ICON_PATHS, "chat-attach-file-icon"));
-      }
-      const meta = el("div", "chat-attach-meta");
-      const nameText = item.name || item.path;
-      const nameEl = el("span", "chat-attach-name", nameText);
-      nameEl.title = nameText;
-      meta.appendChild(nameEl);
-      const sizeText = formatSize(item.size);
-      if (sizeText) meta.appendChild(el("span", "chat-attach-size", sizeText));
-      chip.appendChild(meta);
-      const remove = el("button", "chat-attach-remove", "×");
-      remove.type = "button";
-      remove.setAttribute("aria-label", t("chatAttachRemove"));
-      remove.title = t("chatAttachRemove");
-      remove.addEventListener("click", () => removeTrayItem(item));
-      chip.appendChild(remove);
-      els.tray.appendChild(chip);
-    }
-  }
-
-  function removeTrayItem(item) {
-    const index = trayItems.indexOf(item);
-    if (index < 0) return;
-    trayItems.splice(index, 1);
-    renderTray();
-    updateComposer();
-  }
-
-  function addTrayItems(items) {
-    let added = false;
-    for (const item of items) {
-      if (!item || !item.path) continue;
-      // 同一路径只保留一份
-      if (trayItems.some((existing) => existing.path === item.path)) continue;
-      trayItems.push(item);
-      added = true;
-    }
-    if (added) {
-      renderTray();
-      updateComposer();
-    }
-  }
-
-  function trayItemFromPicked(file) {
-    if (!file || typeof file.path !== "string" || !file.path) return null;
-    const isImage = !!file.isImage;
-    const preview = typeof file.preview === "string" && file.preview.indexOf("data:image/") === 0 ? file.preview : "";
-    return {
-      path: file.path,
-      name: typeof file.name === "string" && file.name ? file.name : basenameOf(file.path),
-      size: Number.isFinite(Number(file.size)) ? Number(file.size) : 0,
-      isImage,
-      sourceUrl: isImage ? preview : "",
-      file: null,
-    };
-  }
-
-  async function pickAttachments() {
-    const api = root.chatAPI;
-    if (!api || typeof api.pickAttachments !== "function") {
-      console.warn("chat: chatAPI.pickAttachments is unavailable");
-      addLocalError("chatAPI.pickAttachments is unavailable");
-      return;
-    }
-    let result;
-    try {
-      result = await api.pickAttachments();
-    } catch (err) {
-      console.warn("chat: pickAttachments failed", err);
-      addLocalError(t("chatAttachPickFailed"));
-      return;
-    }
-    if (!result || result.status === "cancel") return;
-    if (result.status !== "ok" || !Array.isArray(result.files)) {
-      addLocalError(typeof result.message === "string" && result.message ? result.message : t("chatAttachPickFailed"));
-      return;
-    }
-    addTrayItems(result.files.map(trayItemFromPicked).filter(Boolean));
-  }
-
-  // 粘贴板里的图片：读成 data URL 交给主进程落盘（savePastedImage），
-  // 返回的单文件形状与 pickAttachments 一致，拿到后进附件托盘。
-  async function savePastedImageFile(file) {
-    const api = root.chatAPI;
-    if (!api || typeof api.savePastedImage !== "function") {
-      console.warn("chat: chatAPI.savePastedImage is unavailable");
-      addLocalError("chatAPI.savePastedImage is unavailable");
-      return;
-    }
-    const dataUrl = await readFileDataUrl(file);
-    if (!dataUrl) {
-      addLocalError(t("chatPasteFailed"));
-      return;
-    }
-    const name = typeof file.name === "string" && file.name ? file.name : "";
-    let result;
-    try {
-      // 没有可用名字就不传第二个参数，让主进程自己起名
-      result = name ? await api.savePastedImage(dataUrl, name) : await api.savePastedImage(dataUrl);
-    } catch (err) {
-      console.warn("chat: savePastedImage failed", err);
-      addLocalError(errorText(err));
-      return;
-    }
-    const saved = normalizePastedResult(result);
-    if (!saved) {
-      const message = result && typeof result.message === "string" && result.message ? result.message : "";
-      addLocalError(message || t("chatPasteFailed"));
-      return;
-    }
-    if (!saved.preview && dataUrl) saved.preview = dataUrl;
-    const item = trayItemFromPicked(saved);
-    if (!item) {
-      addLocalError(t("chatPasteFailed"));
-      return;
-    }
-    addTrayItems([item]);
-  }
-
-  // savePastedImage 的成功形状：单文件对象本身，或包成 {status:"ok", file}。
-  function normalizePastedResult(result) {
-    if (!result || typeof result !== "object") return null;
-    const file = result.file && typeof result.file === "object" ? result.file : result;
-    if (typeof file.path !== "string" || !file.path) return null;
-    return {
-      path: file.path,
-      name: typeof file.name === "string" ? file.name : "",
-      size: Number.isFinite(Number(file.size)) ? Number(file.size) : 0,
-      isImage: file.isImage !== false,
-      preview: typeof file.preview === "string" && file.preview.indexOf("data:image/") === 0 ? file.preview : "",
-    };
-  }
-
-  async function pathForFile(file) {
-    const api = root.chatAPI;
-    if (!api || typeof api.getPathForFile !== "function") return "";
-    try {
-      const value = api.getPathForFile(file);
-      const resolved = value && typeof value.then === "function" ? await value : value;
-      return typeof resolved === "string" ? resolved : "";
-    } catch (err) {
-      console.warn("chat: getPathForFile failed", err);
-      return "";
-    }
-  }
-
-  function readFileDataUrl(file) {
-    return new Promise((resolve) => {
-      const FileReaderCtor = root.FileReader;
-      if (typeof FileReaderCtor !== "function") {
-        resolve("");
-        return;
-      }
-      try {
-        const reader = new FileReaderCtor();
-        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
-        reader.onerror = () => resolve("");
-        reader.readAsDataURL(file);
-      } catch (err) {
-        resolve("");
-      }
-    });
-  }
-
-  function prefersPng(item) {
-    if (typeof item.sourceUrl === "string" && item.sourceUrl.indexOf("data:image/png") === 0) return true;
-    return /\.(png|webp|gif|bmp)$/i.test(item.name || "");
-  }
-
-  // 用 canvas 把图片压到最长边 96px；失败（解码失败 / 无 canvas）返回空字符串。
-  function makeThumbnail(sourceUrl, preferPng) {
-    return new Promise((resolve) => {
-      const ImageCtor = root.Image;
-      if (typeof ImageCtor !== "function") {
-        resolve("");
-        return;
-      }
-      let settled = false;
-      let timer = null;
-      const finish = (value) => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        resolve(typeof value === "string" ? value : "");
-      };
-      const image = new ImageCtor();
-      image.onload = () => {
-        try {
-          const width = image.naturalWidth || image.width || 0;
-          const height = image.naturalHeight || image.height || 0;
-          if (!width || !height) {
-            finish("");
-            return;
-          }
-          const scale = Math.min(1, THUMB_MAX_SIDE / Math.max(width, height));
-          const canvas = document.createElement("canvas");
-          canvas.width = Math.max(1, Math.round(width * scale));
-          canvas.height = Math.max(1, Math.round(height * scale));
-          const context = canvas.getContext ? canvas.getContext("2d") : null;
-          if (!context) {
-            finish("");
-            return;
-          }
-          context.drawImage(image, 0, 0, canvas.width, canvas.height);
-          const url = preferPng ? canvas.toDataURL("image/png") : canvas.toDataURL("image/jpeg", 0.82);
-          finish(typeof url === "string" && url.indexOf("data:image/") === 0 ? url : "");
-        } catch (err) {
-          finish("");
-        }
-      };
-      image.onerror = () => finish("");
-      // 个别图片解码可能一直不回调，加超时兜底，避免卡住发送
-      timer = setTimeout(() => finish(""), 5000);
-      image.src = sourceUrl;
-    });
-  }
-
-  // 发送载荷：图片尽量带上 canvas 压缩出的 thumb（失败就不带）。
-  async function buildAttachmentPayload(items) {
-    const payload = [];
-    for (const item of items) {
-      if (!item || typeof item.path !== "string" || !item.path) continue;
-      const attachment = {
-        path: item.path,
-        name: item.name || "",
-        size: Number.isFinite(item.size) ? item.size : 0,
-        isImage: !!item.isImage,
-      };
-      if (attachment.isImage && item.sourceUrl) {
-        const thumb = await makeThumbnail(item.sourceUrl, prefersPng(item));
-        if (thumb) attachment.thumb = thumb;
-      }
-      payload.push(attachment);
-    }
-    return payload;
-  }
-
-  function setDropHint(show) {
-    if (els.dropOverlay) els.dropOverlay.hidden = !show;
-    if (els.app) els.app.classList.toggle("chat-drop-active", show);
-  }
-
-  async function handleFileDrop(event) {
-    const dt = event && event.dataTransfer;
-    const files = dt && dt.files ? Array.prototype.slice.call(dt.files) : [];
-    if (!files.length) return;
-    const api = root.chatAPI;
-    const items = [];
-    for (const file of files) {
-      const path = await pathForFile(file);
-      if (!path) continue;
-      const isImage = !!(file.type && String(file.type).indexOf("image/") === 0);
-      let sourceUrl = "";
-      if (isImage) sourceUrl = await readFileDataUrl(file);
-      items.push({
-        path,
-        name: typeof file.name === "string" && file.name ? file.name : basenameOf(path),
-        size: Number.isFinite(Number(file.size)) ? Number(file.size) : 0,
-        isImage,
-        sourceUrl,
-        file,
-      });
-    }
-    if (items.length && api && typeof api.registerDroppedPaths === "function") {
-      try {
-        const registered = api.registerDroppedPaths(items.map((item) => item.path));
-        if (registered && typeof registered.catch === "function") registered.catch(() => {});
-      } catch (err) {
-        console.warn("chat: registerDroppedPaths failed", err);
-      }
-    }
-    if (!items.length) {
-      addLocalError(t("chatAttachPickFailed"));
-      return;
-    }
-    addTrayItems(items);
-  }
-
-  // ── 斜杠指令弹层 ───────────────────────────────────────
-
-  function normalizeCommands(list) {
-    if (!Array.isArray(list)) return [];
-    const commands = [];
-    for (const item of list) {
-      if (!item || typeof item.name !== "string") continue;
-      const name = item.name.trim();
-      if (!name || name.charAt(0) !== "/") continue;
-      commands.push({
-        name,
-        description: typeof item.description === "string" ? item.description : "",
-      });
-    }
-    return commands;
-  }
-
-  // state.commands 优先；为空时退回 listCommands() 缓存，再退回内置三条。
-  function availableCommands() {
-    const pushed = state && Array.isArray(state.commands) ? normalizeCommands(state.commands) : [];
-    if (pushed.length) return pushed;
-    if (commandsCache.length) return commandsCache;
-    return BUILTIN_COMMANDS.map((cmd) => ({ name: cmd.name, description: cmd.description }));
-  }
-
-  // 输入以 "/" 开头、还没打空格时才匹配；按 name 前缀过滤，最多 8 条。
-  function matchingCommands() {
-    const value = els.input.value || "";
-    if (value.charAt(0) !== "/" || /\s/.test(value)) return [];
-    const query = value.toLowerCase();
-    const matches = [];
-    for (const cmd of availableCommands()) {
-      if (cmd.name.toLowerCase().indexOf(query) !== 0) continue;
-      matches.push(cmd);
-      if (matches.length >= COMMAND_LIMIT) break;
-    }
-    return matches;
-  }
-
-  function renderCommandItems() {
-    els.commandList.textContent = "";
-    commandMatches.forEach((cmd, index) => {
-      const item = el("button", "chat-command-item" + (index === commandIndex ? " selected" : ""));
-      item.type = "button";
-      item.setAttribute("role", "option");
-      item.setAttribute("aria-selected", index === commandIndex ? "true" : "false");
-      item.appendChild(el("span", "chat-command-name", cmd.name));
-      const description = localizeText(cmd.description);
-      if (description) item.appendChild(el("span", "chat-command-desc", description));
-      item.addEventListener("mousedown", (event) => event.preventDefault());
-      item.addEventListener("click", () => selectCommand(cmd));
-      els.commandList.appendChild(item);
-    });
-  }
-
-  function updateCommands() {
-    const matches = matchingCommands();
-    if (!matches.length) {
-      closeCommandPopover();
-      return;
-    }
-    const changed =
-      matches.length !== commandMatches.length ||
-      matches.some((cmd, index) => cmd.name !== (commandMatches[index] && commandMatches[index].name));
-    commandMatches = matches;
-    if (changed) commandIndex = 0;
-    if (commandIndex >= commandMatches.length) commandIndex = commandMatches.length - 1;
-    if (commandIndex < 0) commandIndex = 0;
-    renderCommandItems();
-    els.commandPopover.hidden = false;
-  }
-
-  function closeCommandPopover() {
-    if (els.commandPopover.hidden) return;
-    els.commandPopover.hidden = true;
-    commandMatches = [];
-    commandIndex = 0;
-    els.commandList.textContent = "";
-  }
-
-  // 选中后把输入替换成 "/name "，光标留给用户补参数，弹层关闭。
-  function selectCommand(cmd) {
-    if (!cmd || typeof cmd.name !== "string" || !cmd.name) return;
-    els.input.value = cmd.name + " ";
-    closeCommandPopover();
-    autosizeInput();
-    updateComposer();
-    if (typeof els.input.focus === "function") els.input.focus();
-  }
-
-  function handleCommandKeydown(event) {
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      const count = commandMatches.length;
-      if (!count) return false;
-      const delta = event.key === "ArrowDown" ? 1 : -1;
-      commandIndex = (commandIndex + delta + count) % count;
-      renderCommandItems();
-      event.preventDefault();
-      return true;
-    }
-    if (event.key === "Enter") {
-      if (event.isComposing || event.keyCode === 229) return false;
-      const cmd = commandMatches[commandIndex];
-      if (!cmd) return false;
-      selectCommand(cmd);
-      event.preventDefault();
-      return true;
-    }
-    if (event.key === "Escape") {
-      closeCommandPopover();
-      event.preventDefault();
-      return true;
-    }
-    return false;
   }
 
   // ── 启动 ───────────────────────────────────────────────
@@ -1891,7 +1164,6 @@
     buildUi(mount);
     refreshStaticText();
     applyStatus();
-    updateComposer();
     renderMessages(true);
 
     const api = root.chatAPI;
@@ -1912,16 +1184,6 @@
           console.warn("chat: getState failed", err);
           addLocalError(errorText(err));
         });
-    }
-    // 打开窗口时拉一次指令清单补缓存（主用 state.commands 推送；失败不打扰用户）
-    if (typeof api.listCommands === "function") {
-      Promise.resolve(api.listCommands())
-        .then((result) => {
-          if (!result || result.status !== "ok" || !Array.isArray(result.commands)) return;
-          commandsCache = normalizeCommands(result.commands);
-          if (!els.commandPopover.hidden) updateCommands();
-        })
-        .catch(() => {});
     }
   }
 

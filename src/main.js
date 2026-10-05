@@ -1014,6 +1014,21 @@ chatWindowRuntime = createChatWindowRuntime({
   getSavedBounds: () => _settingsController.get("chatWindowBounds"),
   onSaveBounds: (bounds) => _settingsController.applyUpdate("chatWindowBounds", bounds),
   getTitle: () => translate("chatWindowTitle"),
+  // 阶段二：定位（跟随桌宠 / 固定角落）+ 关窗淡出。锚点矩形用桌宠画面本体，
+  // 比窗口外框更贴合；运行时拿不到时会自己退回桌宠窗口矩形。
+  getPetBounds: () => getPetWindowBounds(),
+  getAnchorRect: () => getSessionHudAnchorRect(getPetWindowBounds()),
+  // 「一条」版式：回复窗口贴在快捷面板卡片的顶边，同宽同列。
+  getPanelCardRect: () => _sessionHud.getPanelCardRect(),
+  getPrimaryWorkArea: () => getPrimaryWorkAreaSafe(),
+  getPositionMode: () => _settingsController.get("chatPositionMode"),
+  getFixedCorner: () => _settingsController.get("chatFixedCorner"),
+  isAppQuitting: () => isQuitting,
+  // 窗口开了/关了 → 面板要让位或收回，自动消失的状态也跟着收敛，立即重排一次。
+  onReplyWindowStateChanged: () => {
+    _sessionHud.noteReplyWindowStateChanged(!!getChatWindow());
+    repositionSessionHud();
+  },
   // 首开且没有工作目录：页面加载完成后弹目录选择（见上面的引导函数）。
   onDidFinishLoad: () => { void promptChatWorkingDirIfMissing(); },
   // 关窗即停掉当前会话（interrupt 当前回合并释放 driver）；SDK 子进程留到
@@ -2467,6 +2482,13 @@ function repositionFloatingBubbles() {
 
 function repositionAnchoredFloatingSurfaces() {
   const result = floatingWindowRuntime.repositionAnchoredSurfaces();
+  // 回复窗口跟随桌宠：桌宠漫步/被拖动、屏幕变化、缩放变化都会走到这里。
+  // 跟随模式之外、窗口没开或用户手动拖过时，reposition 内部自己直接返回。
+  if (chatWindowRuntime && typeof chatWindowRuntime.reposition === "function") {
+    try { chatWindowRuntime.reposition(); } catch (err) {
+      console.warn("Clawd: reposition chat window failed:", err && err.message);
+    }
+  }
   // #640: pet bounds changed — re-evaluate the editing-overlap dodge (a drag
   // can slide the pet over the bubble being typed into; the bubble itself is
   // frozen while editing, and roam is paused, so the pet is the mover here).
@@ -3137,6 +3159,49 @@ const _sessionHud = require("./session-hud")({
   onReservedOffsetChange: () => repositionFloatingBubbles(),
   // 二级菜单开合 / 面板收起会重置它：投影里带着 menuOpen，状态一变就重推一次。
   onQuickStateChanged: () => pushQuickChatState(),
+  // 「一条」版式：回复窗口开着且跟随中时返回它的高度，面板据此整体下移一半，
+  // 让「回复窗口 + 面板」这条竖条以桌宠为中心（否则高窗口会顶出屏幕、压住卡片）。
+  getAttachedReplyHeight: () => (
+    chatWindowRuntime && typeof chatWindowRuntime.getAttachedStackHeight === "function"
+      ? chatWindowRuntime.getAttachedStackHeight()
+      : 0
+  ),
+  // 回复窗口自身矩形：并进面板的自动收起热区，鼠标从面板走向桌宠/窗口时
+  // 面板不会提前溜掉。
+  getAttachedReplyRect: () => {
+    const chatWin = getChatWindow();
+    if (!chatWin || chatWin.isDestroyed()) return null;
+    try {
+      const bounds = chatWin.getBounds();
+      return bounds ? { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } : null;
+    } catch {
+      return null;
+    }
+  },
+  // 回复窗口的自动消失（和面板同一套节奏，见 reply-window-autohide.js）。
+  isReplyWindowOpen: () => !!getChatWindow(),
+  isReplyWindowFocused: () => {
+    const chatWin = getChatWindow();
+    if (!chatWin || chatWin.isDestroyed()) return false;
+    try {
+      return typeof chatWin.isFocused === "function" && chatWin.isFocused() === true;
+    } catch {
+      return false;
+    }
+  },
+  // Claude 正在回复（请求在跑 / 回复还在流）：窗口不能中途溜走。
+  isReplyBusy: () => {
+    try {
+      return chatRuntime.getState().busy === true;
+    } catch {
+      return false;
+    }
+  },
+  onReplyVisibilityChanged: (visible) => {
+    if (chatWindowRuntime && typeof chatWindowRuntime.setRevealed === "function") {
+      chatWindowRuntime.setRevealed(visible === true);
+    }
+  },
 });
 repositionSessionHud = _sessionHud.repositionSessionHud;
 repositionQuotaRing = _sessionHud.repositionQuotaRing;
@@ -4781,6 +4846,14 @@ const settingsEffectRouter = createSettingsEffectRouter({
   hideUpdateBubbleForPolicy: () => callRuntimeMethod(_updateBubble, "hideForPolicy"),
   refreshUpdateBubbleAutoClose: () => callRuntimeMethod(_updateBubble, "refreshAutoCloseForPolicy"),
   repositionFloatingBubbles,
+  // 回复窗口的定位设置一变（跟随/角落、选哪个角）：立即重排并恢复跟随。
+  // 面板也要跟着重排一次——「一条」版式只在跟随时成立，切走/切回都要让位/收回。
+  repositionChatWindow: () => {
+    if (chatWindowRuntime && typeof chatWindowRuntime.reposition === "function") {
+      chatWindowRuntime.reposition({ force: true });
+    }
+    repositionSessionHud();
+  },
   applyTextScale: () => applyTextScaleNow(),
   syncSessionHudVisibility: () => syncSessionHudVisibility(),
   handleSessionHudPinnedChanged: (next) => {
@@ -5237,6 +5310,8 @@ chatIpcRuntime = registerChatIpc({
   fs,
   shell,
   getLang: () => lang,
+  // 回复窗口默认隐藏「我自己的消息」（prefs chatShowUserMessages）。
+  getShowUserMessages: () => _settingsController.get("chatShowUserMessages") === true,
   // 历史会话 / 续聊（阶段二）：读列表、按 historyKey 反查可信目标、恢复前回填。
   loadHistory: loadChatSessionHistory,
   resolveResumeTarget: resolveChatResumeTarget,

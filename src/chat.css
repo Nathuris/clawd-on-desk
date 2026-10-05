@@ -600,6 +600,37 @@ html, body {
 .chat-diff-toggle[hidden] { display: none; }
 .chat-diff-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+/* ── 回复窗口：自己的消息默认隐藏（工具栏按钮切换） ── */
+.chat-app.chat-hide-user .chat-msg-user { display: none; }
+
+/* 回复窗口是「瘦高」的一条（默认 300 宽），窄宽度下把留白收紧：
+   工具栏四个按钮不至于挤成两行，消息气泡也能用满整条宽度。 */
+@media (max-width: 420px) {
+  .chat-toolbar { padding: 6px 8px; gap: 4px 6px; }
+  .chat-new-session-button,
+  .chat-history-button,
+  .chat-show-user-button,
+  .chat-stop-button { padding: 5px 8px; }
+  .chat-messages { padding: 12px 10px; }
+  .chat-bubble { max-width: 92%; }
+  .chat-tool-card { max-width: 96%; }
+  .chat-msg-time { margin-inline-start: 6px; }
+}
+
+.chat-show-user-button {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-bg);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chat-show-user-button:hover { background: var(--hover-bg); }
+.chat-show-user-button.active { border-color: var(--accent); color: var(--accent); }
+
 /* ── 输入区 ── */
 /* 渲染端把提示条追加在 form 之后；用 order 让它显示在输入框上方。 */
 .chat-composer-hint {

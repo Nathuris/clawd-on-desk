@@ -247,6 +247,7 @@ function createHarness(overrides = {}) {
     loadBackfill,
     app,
     shell,
+    getShowUserMessages: overrides.getShowUserMessages || (() => false),
   };
   if (typeof overrides.onUserStop === "function") registerOptions.onUserStop = overrides.onUserStop;
   if (typeof overrides.onContextReset === "function") registerOptions.onContextReset = overrides.onContextReset;
@@ -1120,4 +1121,41 @@ test("钩子抛错也不能挡住 runtime 调用", async () => {
   await ipcMain.invoke("chat:stop");
   await ipcMain.invoke("chat:new-session");
   assert.deepEqual(events, ["stop", "newSession"]);
+});
+
+test("chat state carries the showUserMessages flag", async () => {
+  const hidden = createHarness();
+  const hiddenState = await hidden.ipcMain.invoke("chat:get-state");
+  assert.strictEqual(hiddenState.showUserMessages, false, "缺省按隐藏处理");
+
+  const shown = createHarness({ getShowUserMessages: () => true });
+  const shownState = await shown.ipcMain.invoke("chat:get-state");
+  assert.strictEqual(shownState.showUserMessages, true);
+});
+
+test("chat:set-show-user-messages only accepts booleans from the trusted window", async () => {
+  const { ipcMain, calls, chatWebContents, chatMainFrame } = createHarness();
+
+  // 成功时回的是完整状态快照（status 是会话状态 idle/...，不是 IPC 结果码）
+  const ok = await ipcMain.invoke("chat:set-show-user-messages", true);
+  assert.ok(Array.isArray(ok.messages), "回包应带上新状态的快照");
+  assert.strictEqual(typeof ok.showUserMessages, "boolean");
+  assert.deepStrictEqual(
+    calls.filter((c) => c[0] === "applyUpdate"),
+    [["applyUpdate", "chatShowUserMessages", true]]
+  );
+
+  calls.length = 0;
+  // 非布尔一律拒绝（不落盘）
+  for (const bad of ["yes", 1, null, undefined]) {
+    const rejected = await ipcMain.invoke("chat:set-show-user-messages", bad);
+    assert.strictEqual(rejected.status, "error");
+  }
+  assert.deepStrictEqual(calls.filter((c) => c[0] === "applyUpdate"), []);
+
+  // 伪造 sender 不生效
+  ipcMain.invokeEvent = { sender: {}, senderFrame: chatMainFrame };
+  const forged = await ipcMain.invoke("chat:set-show-user-messages", true);
+  assert.strictEqual(forged.status, "error");
+  ipcMain.invokeEvent = { sender: chatWebContents, senderFrame: chatMainFrame };
 });

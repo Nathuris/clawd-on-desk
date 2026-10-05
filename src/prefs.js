@@ -64,7 +64,7 @@ const {
 } = require("./pet-customization-catalog");
 const { normalizeEditorAppList } = require("./editor-window-visibility");
 
-const CURRENT_VERSION = 20;
+const CURRENT_VERSION = 21;
 const DEFAULT_INTEGRATION_INSTALLED_IDS = Object.freeze(["claude-code", "codex"]);
 const DEFAULT_INTEGRATION_INSTALLED_SET = new Set(DEFAULT_INTEGRATION_INSTALLED_IDS);
 
@@ -147,6 +147,15 @@ const SCHEMA = {
   },
   // 记住上次选择的工作目录，空串表示还没选过（首次打开时引导选择）。
   chatLastWorkingDir: { type: "string", default: "" },
+  // 回复窗口默认隐藏「我自己的消息」，只突出 Claude 的输出；工具栏可切换。
+  chatShowUserMessages: { type: "boolean", default: false },
+  // 回复窗口的定位方式：跟随桌宠移动，或固定在主屏幕的某个角落。
+  chatPositionMode: { type: "string", default: "follow", enum: ["follow", "corner"] },
+  chatFixedCorner: {
+    type: "string",
+    default: "bottom-right",
+    enum: ["top-left", "top-right", "bottom-left", "bottom-right"],
+  },
   size: {
     type: "string",
     default: "P:9",
@@ -993,6 +1002,17 @@ function migrate(raw) {
       out.tgApproval.r3DirectSendEnabled = false;
     }
     out.version = 20;
+  }
+  // v20 -> v21（fork 个性化）：对话窗口改版成「瘦高」的回复窗口（默认 300×680，
+  // 跟随时与快捷面板上下紧贴成一条）。旧版本存下来的宽扁尺寸（≥420 宽）会让新
+  // 形状永远不生效，这里一次性清掉位置尺寸记录，下一版按新默认重摆；用户手调过
+  // 的窄窗口（<420 宽）保留，毕竟那本来就是新形状。
+  if ((typeof out.version === "number" ? out.version : 0) < 21) {
+    const chatBounds = out.chatWindowBounds;
+    if (chatBounds && typeof chatBounds === "object" && Number(chatBounds.width) >= 420) {
+      out.chatWindowBounds = null;
+    }
+    out.version = 21;
   }
   if ((typeof out.version === "number" ? out.version : 0) < CURRENT_VERSION) {
     out.version = CURRENT_VERSION;

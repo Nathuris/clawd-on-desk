@@ -302,6 +302,14 @@ const updateRegistry = {
   chatDefaultPermissionMode: requireEnum("chatDefaultPermissionMode", ["default", "acceptEdits", "plan", "auto"]),
   // 空串 = 还没选过工作目录；只允许字符串，清洗交给 prefs 侧的默认值。
   chatLastWorkingDir: requireString("chatLastWorkingDir", { allowEmpty: true }),
+  chatShowUserMessages: requireBoolean("chatShowUserMessages"),
+  chatPositionMode: requireEnum("chatPositionMode", ["follow", "corner"]),
+  chatFixedCorner: requireEnum("chatFixedCorner", [
+    "top-left",
+    "top-right",
+    "bottom-left",
+    "bottom-right",
+  ]),
   // #408: frozen-origin work area for keepSizeAcrossDisplays. null = unknown
   // (legacy prefs / never seeded); otherwise positive width+height.
   savedPixelWorkArea: (value) => {

@@ -1214,6 +1214,8 @@ function makeGeneralSnapshot(overrides = {}) {
     bubbleFollowPet: true,
     bubbleFollowPreference: "auto",
     bubbleFixedCorner: "bottom-right",
+    chatPositionMode: "follow",
+    chatFixedCorner: "bottom-right",
     permissionBubblesEnabled: true,
     notificationBubbleAutoCloseSeconds: 8,
     updateBubbleAutoCloseSeconds: 12,
@@ -10635,6 +10637,65 @@ describe("settings renderer browser environment", () => {
     ]) {
       const matches = i18nSource.match(new RegExp(`\\b${key}:`, "g"));
       assert.strictEqual(matches ? matches.length : 0, SUPPORTED_LANGS.length);
+    }
+  });
+
+  it("renders reply-window placement as a conditional control and patches it in place", async () => {
+    const updateCalls = [];
+    const initialSnapshot = makeGeneralSnapshot({
+      chatPositionMode: "follow",
+      chatFixedCorner: "top-right",
+    });
+    const harness = loadGeneralTabForTest({
+      snapshot: initialSnapshot,
+      settingsAPI: {
+        update: (key, value) => {
+          updateCalls.push({ key, value });
+          return Promise.resolve({ status: "ok" });
+        },
+      },
+    });
+    harness.renderContent();
+
+    const placement = harness.core.state.mountedControls.chatPlacement;
+    assert.ok(placement, "General must mount the reply-window placement controls");
+    // 跟随模式：角落选择藏起来且禁用。
+    assert.strictEqual(placement.modeControl.getValue(), "follow");
+    assert.strictEqual(placement.cornerRow.hidden, true);
+    assert.strictEqual(placement.cornerControl.getValue(), "top-right");
+    assert.ok(placement.cornerControl.element.querySelectorAll("button").every((button) => button.disabled));
+
+    const cornerButton = placement.modeControl.element.querySelectorAll("button")
+      .find((button) => button.dataset.value === "corner");
+    cornerButton.dispatchEvent({ type: "click" });
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    assert.deepStrictEqual(updateCalls, [{ key: "chatPositionMode", value: "corner" }]);
+    assert.strictEqual(placement.cornerRow.hidden, false);
+
+    // 设置从别处改回来时原地同步，不整页重渲染。
+    const originalElement = placement.element;
+    harness.core.ops.applyChanges({
+      changes: { chatPositionMode: "follow", chatFixedCorner: "bottom-left" },
+      snapshot: { ...initialSnapshot, chatPositionMode: "follow", chatFixedCorner: "bottom-left" },
+    });
+    assert.strictEqual(harness.core.state.mountedControls.chatPlacement.element, originalElement);
+    assert.strictEqual(placement.modeControl.getValue(), "follow");
+    assert.strictEqual(placement.cornerControl.getValue(), "bottom-left");
+    assert.strictEqual(placement.cornerRow.hidden, true);
+
+    // 六个文案键必须七种语言齐全。
+    const i18nSource = fs.readFileSync(SETTINGS_I18N, "utf8");
+    for (const key of [
+      "rowChatPlacement",
+      "rowChatPlacementDesc",
+      "chatPlacementFollow",
+      "chatPlacementCorner",
+      "rowChatFixedCorner",
+      "rowChatFixedCornerDesc",
+    ]) {
+      const matches = i18nSource.match(new RegExp(`\\b${key}:`, "g"));
+      assert.strictEqual(matches ? matches.length : 0, SUPPORTED_LANGS.length,
+        `${key} should appear in all ${SUPPORTED_LANGS.length} supported languages`);
     }
   });
 

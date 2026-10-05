@@ -74,29 +74,35 @@ function payloadValue(payload, field) {
   return payload;
 }
 
-test("chat preload exposes the full window.chatAPI surface", () => {
+test("chat preload exposes exactly the reply-window surface", () => {
   const { exposed } = loadPreload();
   const chatAPI = exposed.get("chatAPI");
   assert.ok(chatAPI, "preload must expose window.chatAPI");
   for (const method of [
     "getState",
-    "send",
     "stop",
     "newSession",
-    "pickWorkingDir",
-    "setEffort",
-    "setPermissionMode",
+    "setShowUserMessages",
+    "openExternal",
     "listHistory",
     "resumeSession",
-    "pickAttachments",
-    "savePastedImage",
-    "openExternal",
-    "listCommands",
-    "registerDroppedPaths",
-    "getPathForFile",
     "onUpdate",
   ]) {
     assert.equal(typeof chatAPI[method], "function", `chatAPI.${method} must be a function`);
+  }
+  // 只读窗口：发送 / 附件 / 指令 / 目录 / effort / 权限模式都不再从窗口暴露
+  for (const gone of [
+    "send",
+    "pickWorkingDir",
+    "setEffort",
+    "setPermissionMode",
+    "pickAttachments",
+    "savePastedImage",
+    "listCommands",
+    "registerDroppedPaths",
+    "getPathForFile",
+  ]) {
+    assert.equal(gone in chatAPI, false, `chatAPI.${gone} must not be exposed anymore`);
   }
   // 权限确认走桌宠气泡：窗口 API 不再暴露决策入口。
   assert.equal("respondPermission" in chatAPI, false, "respondPermission must not be exposed");
@@ -108,50 +114,40 @@ test("chat preload forwards each operation to its dedicated invoke channel", asy
   const historyKey = "a".repeat(32);
 
   await chatAPI.getState();
-  await chatAPI.send("你好");
   await chatAPI.stop();
   await chatAPI.newSession();
-  await chatAPI.pickWorkingDir();
-  await chatAPI.setEffort("high");
-  await chatAPI.setPermissionMode("plan");
+  await chatAPI.setShowUserMessages(true);
+  await chatAPI.openExternal("https://example.com/docs");
   await chatAPI.listHistory();
   await chatAPI.resumeSession(historyKey);
-  await chatAPI.pickAttachments();
-  await chatAPI.savePastedImage("data:image/png;base64,aGk=", "clip.png");
-  await chatAPI.openExternal("https://example.com/docs");
-  await chatAPI.listCommands();
-  await chatAPI.registerDroppedPaths(["/tmp/a.txt", "/tmp/b.png"]);
 
   assert.deepEqual(
     invokes.map(([channel]) => channel),
     [
       "chat:get-state",
-      "chat:send",
       "chat:stop",
       "chat:new-session",
-      "chat:pick-working-dir",
-      "chat:set-effort",
-      "chat:set-permission-mode",
+      "chat:set-show-user-messages",
+      "chat:open-external",
       "chat:list-history",
       "chat:resume-session",
-      "chat:pick-attachments",
-      "chat:save-pasted-image",
-      "chat:open-external",
-      "chat:list-commands",
-      "chat:register-dropped-paths",
     ],
   );
-  assert.equal(payloadValue(invokes[1][1], "text"), "你好");
-  assert.equal(payloadValue(invokes[5][1], "effort"), "high");
-  assert.equal(payloadValue(invokes[6][1], "permissionMode"), "plan");
-  assert.equal(payloadValue(invokes[8][1], "historyKey"), historyKey);
-  assert.equal(payloadValue(invokes[10][1], "dataUrl"), "data:image/png;base64,aGk=");
-  assert.equal(payloadValue(invokes[10][1], "name"), "clip.png");
-  assert.equal(payloadValue(invokes[11][1], "url"), "https://example.com/docs");
-  assert.deepEqual(payloadValue(invokes[13][1], "paths"), ["/tmp/a.txt", "/tmp/b.png"]);
+  // 开关只传严格布尔：非 true 一律按 false（与主进程校验一致）
+  assert.equal(invokes[3][1], true);
+  assert.equal(payloadValue(invokes[4][1], "url"), "https://example.com/docs");
+  assert.equal(payloadValue(invokes[6][1], "historyKey"), historyKey);
 
   // invoke 的结果原样返回给渲染端。
   assert.deepEqual(await chatAPI.getState(), { status: "ok" });
+});
+
+test("chat preload coerces the show-user-messages flag to a strict boolean", async () => {
+  const { exposed, invokes } = loadPreload();
+  const chatAPI = exposed.get("chatAPI");
+  await chatAPI.setShowUserMessages("yes");
+  await chatAPI.setShowUserMessages(undefined);
+  assert.deepEqual(invokes.map(([, arg]) => arg), [false, false]);
 });
 
 test("chat preload forwards chat:update snapshots and unsubscribes exactly", () => {
@@ -189,55 +185,4 @@ test("chat preload tolerates a non-function onUpdate listener", () => {
   assert.equal(typeof unsubscribe, "function");
   assert.doesNotThrow(() => unsubscribe());
   assert.doesNotThrow(() => dispatch("chat:update", { status: "idle" }));
-});
-
-test("chat preload forwards send attachments inside the payload and normalizes them to an array", async () => {
-  const { exposed, invokes } = loadPreload();
-  const chatAPI = exposed.get("chatAPI");
-  const attachments = [{ path: "/tmp/note.txt", name: "note.txt", size: 3, isImage: false }];
-  // vm 沙箱里造的对象与测试进程原型不同，比较前先 JSON 归一化。
-  const plain = (value) => JSON.parse(JSON.stringify(value));
-
-  await chatAPI.send("看附件", attachments);
-  assert.equal(invokes[0][0], "chat:send");
-  assert.deepEqual(plain(invokes[0][1]), { text: "看附件", attachments });
-
-  // 不带附件 / 传非数组时归一成空数组，主进程只见到统一载荷。
-  await chatAPI.send("没有附件");
-  assert.deepEqual(plain(invokes[1][1]), { text: "没有附件", attachments: [] });
-  await chatAPI.send("怪参数", "not-an-array");
-  assert.deepEqual(plain(invokes[2][1]), { text: "怪参数", attachments: [] });
-});
-
-test("chat preload forwards pasted images and external links in the contract payload shapes", async () => {
-  const { exposed, invokes } = loadPreload();
-  const chatAPI = exposed.get("chatAPI");
-  // vm 沙箱里造的对象与测试进程原型不同，比较前先 JSON 归一化（顺带丢掉 undefined）。
-  const plain = (value) => JSON.parse(JSON.stringify(value));
-  const dataUrl = "data:image/png;base64,aGk=";
-
-  await chatAPI.savePastedImage(dataUrl, "clip.png");
-  assert.equal(invokes[0][0], "chat:save-pasted-image");
-  assert.deepEqual(plain(invokes[0][1]), { dataUrl, name: "clip.png" });
-
-  // 没给名字 / 名字不是字符串：不把无效字段塞给主进程。
-  await chatAPI.savePastedImage(dataUrl);
-  assert.deepEqual(plain(invokes[1][1]), { dataUrl });
-  await chatAPI.savePastedImage(dataUrl, 42);
-  assert.deepEqual(plain(invokes[2][1]), { dataUrl });
-
-  // 外链走主进程统一通道（渲染端不直接开新窗口）。
-  await chatAPI.openExternal("https://example.com/a?b=1");
-  assert.equal(invokes[3][0], "chat:open-external");
-  assert.deepEqual(plain(invokes[3][1]), { url: "https://example.com/a?b=1" });
-});
-
-test("chat preload resolves dropped files to paths through electron webUtils", () => {
-  const { exposed } = loadPreload();
-  const chatAPI = exposed.get("chatAPI");
-
-  assert.equal(chatAPI.getPathForFile({ __testPath: "/tmp/dropped.png" }), "/tmp/dropped.png");
-  // 拿不到路径（非文件等）返回空串，不向渲染端抛错。
-  assert.equal(chatAPI.getPathForFile(null), "");
-  assert.equal(chatAPI.getPathForFile({}), "");
 });

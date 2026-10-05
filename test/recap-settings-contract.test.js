@@ -17,7 +17,7 @@ function controller(snapshot) {
 }
 
 test("recap is enabled by default and v18 upgrades opt in locally", () => {
-  assert.equal(prefs.CURRENT_VERSION, 20);
+  assert.equal(prefs.CURRENT_VERSION, 21);
   assert.equal(prefs.getDefaults().recapEnabled, true);
   const upgraded = prefs.migrate({ version: 18 });
   assert.equal(upgraded.recapEnabled, true);

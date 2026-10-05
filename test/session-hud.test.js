@@ -401,6 +401,7 @@ describe("快捷面板源码级契约", () => {
       "sendI18n",
       "getHudReservedOffset",
       "getBlockRects",
+      "getPanelCardRect",
       "getWindows",
       "cleanup",
       "getWindow",
@@ -486,5 +487,40 @@ describe("快捷面板源码级契约", () => {
     const roamSrc = fs.readFileSync(path.join(__dirname, "..", "src", "roam.js"), "utf8");
     assert.match(roamSrc, /ctx\.isQuickPanelOpen/);
     assert.match(mainSrc, /isQuickPanelOpen: \(\) => !!\(/);
+  });
+
+  it("给回复窗口让位：「一条」版式下卡片整体下移窗口高度的一半", () => {
+    assert.match(src, /function getAttachedReplyHeight\(\)/);
+    assert.match(src, /function getPanelCardRect\(\)/);
+    // 锚点下移半个窗口高度，于是「回复窗口 + 卡片」这条竖条以桌宠为中心。
+    assert.match(src, /top: anchorRect\.top \+ attachedHeight \/ 2/);
+    assert.match(src, /bottom: anchorRect\.bottom \+ attachedHeight \/ 2/);
+    // 卡片矩形取「收起态」的底边：展开菜单不该挪动上面那条接缝。
+    assert.match(src, /const cardHeight = Math\.ceil\(QUICK_CARD\.height \* getTextScale\(\)\)/);
+    assert.match(src, /y: Math\.round\(content\.y \+ content\.height - cardHeight\)/);
+    // main 两侧接线：高度从回复窗口取、卡片位置给回复窗口用。
+    assert.match(mainSrc, /getAttachedReplyHeight: \(\) => \(/);
+    assert.match(mainSrc, /getPanelCardRect: \(\) => _sessionHud\.getPanelCardRect\(\)/);
+    assert.match(mainSrc, /onReplyWindowStateChanged: \(\) => \{/);
+    // 热区要连回复窗口一起算：鼠标从面板走向桌宠时会经过它。
+    assert.match(src, /getAttachedReplyRect\(\)/);
+    assert.match(mainSrc, /getAttachedReplyRect: \(\) => \{/);
+  });
+
+  it("回复窗口和面板一起自动消失（同一次光标采样、两套判定）", () => {
+    assert.match(src, /const \{ decideReplyWindowVisibility \} = require\("\.\/reply-window-autohide"\)/);
+    assert.match(src, /function syncReplyWindowAutoHide\(/);
+    assert.match(src, /function syncPanelAutoHide\(/);
+    // 窗口开着就一直轮询（否则它永远收不起来），宠物藏了/省电模式下不轮询。
+    assert.match(src, /if \(isReplyWindowOpen\(\)\) return true;/);
+    // 开窗 / 关窗时状态收敛：刚开先给宽限，关掉后复位。
+    assert.match(src, /function noteReplyWindowStateChanged\(open\)/);
+    // 「刚回复完」要能识别出边沿，否则每次轮询都会重新开始停留。
+    assert.match(src, /wasBusy: replyWasBusy/);
+    assert.match(src, /replyWasBusy = busy;/);
+    assert.match(mainSrc, /isReplyWindowOpen: \(\) => !!getChatWindow\(\)/);
+    assert.match(mainSrc, /isReplyBusy: \(\) => \{/);
+    assert.match(mainSrc, /onReplyVisibilityChanged: \(visible\) => \{/);
+    assert.match(mainSrc, /_sessionHud\.noteReplyWindowStateChanged\(!!getChatWindow\(\)\)/);
   });
 });

@@ -2084,13 +2084,25 @@ html, body {
   display: grid;
   width: 100%;
 }
+/* 回复窗口位置（阶段二）复用气泡位置的版式，只是类名不同。 */
+.chat-placement-mode-segmented,
+.chat-fixed-corner-segmented {
+  display: grid;
+  width: 100%;
+}
 .bubble-placement-mode-segmented {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.chat-placement-mode-segmented {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .bubble-follow-preference-segmented {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .bubble-fixed-corner-segmented {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.chat-fixed-corner-segmented {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 .bubble-placement-group .settings-segmented-radio button {
@@ -2102,6 +2114,9 @@ html, body {
 }
 @media (max-width: 760px) {
   .bubble-fixed-corner-segmented {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .chat-fixed-corner-segmented {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

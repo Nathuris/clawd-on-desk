@@ -143,6 +143,10 @@ function registerChatIpc(options = {}) {
   const getChatWindow = typeof options.getChatWindow === "function"
     ? options.getChatWindow
     : () => null;
+  // 「显示我的消息」开关（prefs chatShowUserMessages）：回复窗口默认只看回复。
+  const getShowUserMessages = typeof options.getShowUserMessages === "function"
+    ? options.getShowUserMessages
+    : null;
   // 当前语言：优先用 main.js 注入的 getLang（与 settings-ipc.js 一致）；
   // 没注入就照 Settings 的做法从 controller 读 prefs.lang，最后回退中文。
   const getLang = typeof options.getLang === "function"
@@ -218,7 +222,9 @@ function registerChatIpc(options = {}) {
       : { status: "error", message: "untrusted chat sender" };
   }
 
-  // 当前完整状态快照 + lang。渲染端 chat-i18n 依赖该字段选语言。
+  // 当前完整状态快照 + lang。渲染端 chat-i18n 依赖该字段选语言；
+  // showUserMessages 是「显示我的消息」开关（prefs chatShowUserMessages），
+  // 缺省注入时按隐藏处理——窗口至少是「只看回复」的安全默认。
   function currentState() {
     let state = null;
     try {
@@ -226,7 +232,10 @@ function registerChatIpc(options = {}) {
     } catch (err) {
       console.warn("Clawd: chatRuntime.getState failed:", err && err.message);
     }
-    return { ...(isPlainObject(state) ? state : {}), lang: getLang() };
+    const showUserMessages = typeof getShowUserMessages === "function"
+      ? getShowUserMessages() === true
+      : false;
+    return { ...(isPlainObject(state) ? state : {}), lang: getLang(), showUserMessages };
   }
 
   function sendStateToWindow(payload) {
@@ -594,6 +603,22 @@ function registerChatIpc(options = {}) {
     // 先清队再 stop：stop 回到 idle 的边沿会触发排队器放行下一条。
     notifyUserStop();
     await applyRuntimeCall("stop");
+    return respondWithState();
+  });
+
+  // 回复窗口的「显示我的消息」开关：落 prefs 后回一份带新字段的状态快照。
+  handle("chat:set-show-user-messages", (event, value) => {
+    const rejected = rejectUntrustedChatEvent(event);
+    if (rejected) return rejected;
+    if (typeof value !== "boolean") {
+      return { status: "error", message: "chat:set-show-user-messages requires a boolean" };
+    }
+    try {
+      const result = settingsController.applyUpdate("chatShowUserMessages", value);
+      if (result && result.status === "error") return result;
+    } catch (err) {
+      return { status: "error", message: err && err.message };
+    }
     return respondWithState();
   });
 

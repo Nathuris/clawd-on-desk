@@ -65,6 +65,7 @@ function createHarness(options = {}) {
     hideUpdateBubbleForPolicy: () => calls.push(["hideUpdateBubbleForPolicy"]),
     refreshUpdateBubbleAutoClose: () => calls.push(["refreshUpdateBubbleAutoClose"]),
     repositionFloatingBubbles: () => calls.push(["repositionFloatingBubbles"]),
+    repositionChatWindow: () => calls.push(["repositionChatWindow"]),
     applyTextScale: () => calls.push(["applyTextScale"]),
     syncSessionHudVisibility: () => calls.push(["syncSessionHudVisibility"]),
     refreshDisplayedVisual: () => calls.push(["refreshDisplayedVisual"]),
@@ -184,6 +185,21 @@ describe("settings-effect-router", () => {
       // rebuilt; the two new Settings-only preference keys do not.
       if ("bubbleFollowPet" in changes) expected.push(["rebuildAllMenus"]);
       assert.deepStrictEqual(calls, expected);
+    }
+  });
+
+  it("repositions the reply window once for each placement change", () => {
+    for (const changes of [
+      { chatPositionMode: "corner" },
+      { chatFixedCorner: "top-left" },
+      { chatPositionMode: "follow", chatFixedCorner: "bottom-left" },
+    ]) {
+      const { calls, emit } = createHarness();
+      emit(changes);
+      assert.deepStrictEqual(calls, [
+        ["updateMirrors", changes],
+        ["repositionChatWindow"],
+      ]);
     }
   });
 
