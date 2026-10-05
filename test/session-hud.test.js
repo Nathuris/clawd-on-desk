@@ -233,63 +233,57 @@ describe("快捷面板显隐判定", () => {
   });
 });
 
-describe("二级设置菜单（主进程侧）", () => {
-  it("expanded card is exactly the collapsed card plus the menu area", () => {
-    assert.deepStrictEqual(QUICK_CARD, { width: 300, height: 134 });
-    assert.deepStrictEqual(QUICK_CARD_EXPANDED, { width: 300, height: 316 });
-    assert.strictEqual(QUICK_CARD_EXPANDED.width, QUICK_CARD.width);
-    // 收起态菜单高度 0（仍占 4px 行距），展开 = 收起 + 菜单 182
-    assert.strictEqual(QUICK_CARD_EXPANDED.height, QUICK_CARD.height + 182);
+describe("卡片几何（只剩状态行 + 输入行）", () => {
+  it("卡片高度 = 状态行 + 行距 + 输入行 + 内边距 + 边框", () => {
+    // 6 + 16 + 4 + 32 + 6 + 2 = 66
+    assert.deepStrictEqual(QUICK_CARD, { width: 300, height: 66 });
   });
 
-  it("expanding grows upward only: bottom edge pinned, pet-side anchor stays put", () => {
+  it("卡片始终夹在工作区内，贴桌宠那一侧的锚点不变", () => {
+    const bounds = computeBlockBounds({
+      hitRect: HIT_RECT, anchorRect: null, workArea: WORK_AREA,
+      cardW: QUICK_CARD.width, cardH: QUICK_CARD.height, shell: QUICK_SHELL,
+      prefer: "left", scale: 1, widthScale: 1,
+    });
+    assert.ok(bounds.contentBounds.y >= WORK_AREA.y);
+    assert.ok(
+      bounds.contentBounds.y + bounds.contentBounds.height
+        <= WORK_AREA.y + WORK_AREA.height
+    );
+    assert.ok(bounds.contentBounds.x < HIT_RECT.left, "默认贴桌宠左侧");
+  });
+
+  it("展开态只服务于会话列表（内置客户端的二级菜单已经删掉）", () => {
+    assert.doesNotMatch(src, /quick-menu|quick-mode-option|quick-effort/);
+    assert.doesNotMatch(src, /setMenuOpen|isMenuOpen/);
+    // 列表展开：卡片变高 + 钉住 hold，收起时复位
+    assert.match(src, /cardH: sessionListOpen \? QUICK_CARD_EXPANDED\.height : QUICK_CARD\.height/);
+    assert.match(src, /if \(next\) holdReasons\.add\("menu"\);/);
+    assert.match(src, /function setSessionListOpen\(open\)/);
+  });
+
+  it("展开会话列表时卡片变高，且只往上长（底边钉住）", () => {
     const base = {
       hitRect: HIT_RECT, anchorRect: null, workArea: WORK_AREA,
       cardW: QUICK_CARD.width, shell: QUICK_SHELL,
       prefer: "left", scale: 1, widthScale: 1,
     };
     const collapsed = computeBlockBounds({ ...base, cardH: QUICK_CARD.height });
-    const expanded = computeBlockBounds({
-      ...base,
-      cardH: QUICK_CARD_EXPANDED.height,
-      baseCardH: QUICK_CARD.height,
+    const opened = computeBlockBounds({
+      ...base, cardH: QUICK_CARD_EXPANDED.height, baseCardH: QUICK_CARD.height,
     });
-    // 水平锚点（贴桌宠那一侧）不变
-    assert.equal(expanded.contentBounds.x, collapsed.contentBounds.x);
-    assert.equal(expanded.contentBounds.width, collapsed.contentBounds.width);
-    // 底边钉住不动，多出来的高度全在上方
+    assert.equal(opened.contentBounds.x, collapsed.contentBounds.x, "贴桌宠那一侧不动");
     assert.equal(
-      expanded.contentBounds.y + expanded.contentBounds.height,
-      collapsed.contentBounds.y + collapsed.contentBounds.height
+      opened.contentBounds.y + opened.contentBounds.height,
+      collapsed.contentBounds.y + collapsed.contentBounds.height,
+      "底边钉住，多出来的高度全在上方"
     );
-    assert.ok(expanded.contentBounds.y < collapsed.contentBounds.y);
-  });
-
-  it("expanding near the top edge clamps back inside the work area", () => {
-    const petAtTop = { left: 700, top: 60, right: 760, bottom: 120 };
-    const expanded = computeBlockBounds({
-      hitRect: petAtTop, anchorRect: null, workArea: WORK_AREA,
-      cardW: QUICK_CARD.width, cardH: QUICK_CARD_EXPANDED.height,
-      baseCardH: QUICK_CARD.height, shell: QUICK_SHELL,
-      prefer: "left", scale: 1, widthScale: 1,
-    });
-    assert.ok(expanded.contentBounds.y >= WORK_AREA.y);
-    assert.ok(
-      expanded.contentBounds.y + expanded.contentBounds.height
-        <= WORK_AREA.y + WORK_AREA.height
+    assert.ok(opened.contentBounds.y < collapsed.contentBounds.y);
+    assert.strictEqual(
+      QUICK_CARD_EXPANDED.height - QUICK_CARD.height,
+      250 + 4,
+      "列表区 250（4 条会话 4×28 + 新建 28 + 两个开关 34+34 + 选文件夹 28 + 行距 7×2），再加一个卡片行距 4"
     );
-  });
-
-  it("menu state drives the card height and holds the panel open", () => {
-    assert.match(src, /cardH: expanded \? QUICK_CARD_EXPANDED\.height : QUICK_CARD\.height/);
-    assert.match(src, /if \(next\) holdReasons\.add\("menu"\);/);
-    assert.match(src, /holdReasons\.delete\("menu"\)/);
-  });
-
-  it("hiding the panel resets the menu so the next reveal is collapsed", () => {
-    const hideFn = src.match(/function hidePanel\(\) \{[\s\S]*?\n  \}/);
-    assert.ok(hideFn, "hidePanel function missing");
-    assert.match(hideFn[0], /expanded = false/);
   });
 
   it("grows the window immediately but defers shrinking until the panel is hidden", () => {
@@ -411,8 +405,6 @@ describe("快捷面板源码级契约", () => {
       "clearReveal",
       "dismissForAction",
       "setHold",
-      "setMenuOpen",
-      "isMenuOpen",
       "pushQuickState",
       "isPanelOpen",
     ]) {

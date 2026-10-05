@@ -219,6 +219,19 @@ const { restoreSessionsFromRecoveryLeases } = require("./session-recovery-loader
 const { createSessionHistoryRuntime } = require("./session-history-runtime");
 const { getAllAgents, getAgent } = require("../agents/registry");
 const { getAgentIconUrl } = require("./state-agent-icons");
+const { stripInheritedClaudeSessionEnv } = require("./claude-session-env");
+const {
+  INITIAL_PERMISSION_MODE,
+  INITIAL_EFFORT,
+  normalizePermissionMode,
+  normalizeEffort,
+  buildNewSessionArgs,
+} = require("./session-new-options");
+// ── 清掉从启动环境继承来的 Claude Code 会话标记 ──
+// 应用常是从一个终端里启动的，会把那个终端的环境一起继承下来；如果那儿正跑着
+// Claude Code，它的「会话标记」会一路传给应用之后打开的终端，害得新会话以为
+// 自己是个子会话、不保存对话记录。见 src/claude-session-env.js。
+stripInheritedClaudeSessionEnv();
 // ── Autoplay policy: allow sound playback without user gesture ──
 // MUST be set before any BrowserWindow is created (before app.whenReady)
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
@@ -989,7 +1002,7 @@ async function pickChatWorkingDir() {
     console.warn("Clawd: chat setWorkingDir failed:", err && err.message);
     return { status: "error", message: err && err.message };
   }
-  pushQuickChatState();
+  pushQuickState();
   return { status: "ok", path: picked };
 }
 
@@ -1085,32 +1098,203 @@ function loadChatBackfill(sessionId) {
   return [];
 }
 
-// 悬停面板的快捷输入排队（定义在 runtime 之前，onUpdate 扇出会用到）。
-let chatPromptQueue = null;
+// ── 悬停面板：把一句话送到终端里那个会话 ──
+// 面板的输入框不再连内置 SDK 会话，而是把文字投递到终端 App 里正在跑的那个 CLI
+// 会话（见 src/session-prompt-send.js）。目标固定为「最近活动的会话」——快照里
+// hudLastSessionId 就是它（已过滤 headless/sleeping/hidden）。
+let lastSessionSnapshot = null;
+let terminalAppSender = null;
+let sessionPromptSend = null;
+// 降级路线共用：发不出去的时候把话留在剪贴板里，别让用户白打一遍。
+function copyPromptToClipboard(text) {
+  try {
+    clipboard.writeText(text, "clipboard");
+    return true;
+  } catch (err) {
+    console.warn("Clawd: 复制到剪贴板失败:", err && err.message);
+    return false;
+  }
+}
+(function initQuickSendLayer() {
+  const { createTerminalAppSender } = require("./terminal-app-send");
+  const { createSessionPromptSend } = require("./session-prompt-send");
+  terminalAppSender = createTerminalAppSender({ log: (msg) => sessionLog(msg) });
+  sessionPromptSend = createSessionPromptSend({
+    getTargetSession: () => resolveQuickTarget(),
+    terminalAppSender,
+    copyText: copyPromptToClipboard,
+    focusSession: (sessionId) => focusDashboardSession(sessionId),
+    log: (msg) => sessionLog(msg),
+  });
+})();
 
-// 快捷输入面板的状态投影：聊天会话的运行状态 + 队列计数 + 工作目录名。
+// 面板目标会话的完整信息：快照给展示字段，内部 sessions Map 给投递要用的
+// sourcePid / pidChain（这两个刻意不进共享快照）。
+// 目标的选择顺序：用户在面板里手选的那个（只要还活着）→ 最近活动的会话。
+// 只在内存里记，不落 prefs：会话本来就是一会儿开一会儿关的东西。
+let quickSelectedSessionId = null;
+
+// 面板里手动选过的「新建会话」目录。只在内存里记，不落 prefs：目录会被改名、
+// 会被删，记住一个已经没了的路径反而更糟；重启就回到默认（跟随当前目标会话）。
+let quickNewSessionFolder = null;
+
+// 「新建会话」的权限模式与思考强度（面板里那两排小按钮）。同样只在内存里记：
+// 重启就回到初始档，免得上次选的档位悄悄跟着下一次开工。
+let quickNewSessionPermissionMode = INITIAL_PERMISSION_MODE;
+let quickNewSessionEffort = INITIAL_EFFORT;
+
+// 面板里排好的「新会话」：点「＋ 在终端里新建会话」先只在列表里占一个位，
+// 等用户真正发出第一句话时，才在终端里把这台会话开起来并带上那句话
+// （claude 支持把提示词当参数直接传，见 src/terminal-app-send.js）。
+// 同时只留一个占位：再点一次就是重新排，取消走 panel 上的 ✕。
+let quickPendingNewSession = null; // { id, launched, folder, launchedAt }
+let quickPendingSeq = 0;
+// 开新会话前快照下来的会话 id：新会话起来后会带着新 id 出现在会话快照里，
+// 用它来「认领」——认领到了就把占位行换成真会话行。
+let quickSessionIdsBeforeLaunch = null;
+// 认领的兜底时限：hooks 没上报（或那个会话一开就退）时，占位不能永远钉着目标。
+const PENDING_ADOPT_TIMEOUT_MS = 20000;
+
+function homeDir() {
+  try { return require("os").homedir(); } catch { return null; }
+}
+
+// 显示用路径：主目录缩成 ~，否则面板那一行放不下。
+function shortenFolderPath(full) {
+  if (!full) return null;
+  const home = homeDir();
+  if (home && home !== "/" && (full === home || full.startsWith(home + path.sep))) {
+    return "~" + full.slice(home.length);
+  }
+  return full;
+}
+
+// 新建会话落在哪个目录：手选过的优先 → 当前目标会话的项目目录 → 用户主目录
+// （一个会话都没有时别落到应用自己的工作目录里）。
+function resolveQuickNewSessionFolder() {
+  if (quickNewSessionFolder) return quickNewSessionFolder;
+  const target = resolveQuickSessionTarget();
+  return (target && target.cwd) || homeDir();
+}
+
+function listQuickSessions() {
+  const snapshot = lastSessionSnapshot;
+  if (!snapshot) return [];
+  return (Array.isArray(snapshot.sessions) ? snapshot.sessions : [])
+    .map((entry) => {
+      if (!entry || !entry.id) return null;
+      const runtime = sessions.get(String(entry.id)) || null;
+      return {
+        id: entry.id,
+        displayTitle: entry.displayTitle || entry.sessionTitle || null,
+        folder: entry.cwd ? path.basename(entry.cwd) : null,
+        cwd: entry.cwd || null,
+        state: entry.state || null,
+        agentId: entry.agentId || null,
+        sourcePid: (runtime && runtime.sourcePid) || null,
+        pidChain: (runtime && Array.isArray(runtime.pidChain)) ? runtime.pidChain : [],
+      };
+    })
+    .filter(Boolean);
+}
+
+// 最近活动的那个真实会话（不考虑面板里排好的「新会话」占位）。
+// 「新会话开在哪个目录」要跟着它走，所以不能受占位影响。
+function resolveQuickSessionTarget() {
+  const all = listQuickSessions();
+  if (!all.length) return null;
+  const picked = quickSelectedSessionId
+    ? all.find((item) => item.id === quickSelectedSessionId)
+    : null;
+  if (picked) return picked;
+  // 手选的那个没了（会话结束）→ 悄悄退回最近活动的那个。
+  if (quickSelectedSessionId) quickSelectedSessionId = null;
+  const latestId = lastSessionSnapshot && lastSessionSnapshot.hudLastSessionId;
+  return all.find((item) => item.id === latestId) || all[0] || null;
+}
+
+// 面板当前的目标：手选的会话 → 排好的新会话 → 最近活动的会话。
+function resolveQuickTargetEntry() {
+  const session = resolveQuickSessionTarget();
+  // 手选优先：用户明确点了某个会话，就别被占位抢走。
+  if (session && session.id === quickSelectedSessionId) return { kind: "session", session };
+  if (quickPendingNewSession) return { kind: "pending", pending: quickPendingNewSession };
+  return session ? { kind: "session", session } : null;
+}
+
+// 投递层只认真会话：目标是「还没开起来的新会话」时它拿不到东西，
+// 那条路在 quickSendPrompt 里单独走（先在终端里开起来，再带上这句话）。
+function resolveQuickTarget() {
+  const entry = resolveQuickTargetEntry();
+  return entry && entry.kind === "session" ? entry.session : null;
+}
+
+// 面板的状态投影：告诉渲染端「有哪些会话可选、当前发给谁、能不能新建」。
 // 变化检测在 session-hud.pushQuickState 里做（JSON 比对）。
-function buildQuickChatState(state) {
-  const snap = chatPromptQueue ? chatPromptQueue.getSnapshot() : { count: 0, blocked: null };
+function buildQuickSendState() {
+  const all = listQuickSessions();
+  const entry = resolveQuickTargetEntry();
+  const target = entry && entry.kind === "session" ? entry.session : null;
+  const pending = quickPendingNewSession;
+  const newSessionFolder = resolveQuickNewSessionFolder();
   return {
-    effort: state && state.effort,
-    permissionMode: state && state.permissionMode,
-    status: (state && state.status) || "idle",
-    busy: !!(state && state.busy),
-    queuedCount: snap.count,
-    blocked: snap.blocked,
-    hasCwd: !!(state && state.cwd),
-    cwdName: state && state.cwd ? path.basename(state.cwd) : null,
-    // 二级设置菜单的展开状态（状态源在 session-hud，这里只是转发给渲染端）。
-    menuOpen: getSessionHudMenuOpen(),
+    targetId: target ? target.id : null,
+    targetTitle: target ? target.displayTitle : null,
+    targetFolder: target ? target.folder : null,
+    targetState: target ? target.state : null,
+    canSend: !!(target || pending),
+    // 目标是「还没开起来的新会话」时，标题与状态由渲染端从字典里取。
+    targetPending: !!pending && entry.kind === "pending",
+    // 排好的新会话占位：列表第一行，✕ 可以取消。
+    pendingId: pending ? pending.id : null,
+    pendingLaunched: !!(pending && pending.launched),
+    // 目标文件夹的完整路径：新建会话要在同一个项目里开。
+    targetCwd: target ? target.cwd : null,
+    sessions: all.map((item) => ({
+      id: item.id,
+      title: item.displayTitle,
+      folder: item.folder,
+      state: item.state,
+      active: !!target && item.id === target.id,
+    })),
+    canCreateSession: process.platform === "darwin",
+    // 新建会话的落地目录：短路径给「选择文件夹」那一行的第二行小字，
+    // 目录名给「新建会话」那一行，让用户点之前就知道会开在哪儿。
+    newSessionFolder: shortenFolderPath(newSessionFolder),
+    newSessionFolderName: newSessionFolder ? path.basename(newSessionFolder) || newSessionFolder : null,
+    // 新建会话的两个开关（渲染端按这组值画小按钮）。
+    permissionMode: quickNewSessionPermissionMode,
+    effort: quickNewSessionEffort,
+    // 会话列表展开状态：状态源在主进程（窗口高度要跟着变）。
+    listOpen: getSessionHudListOpen(),
   };
 }
 
-function pushQuickChatState() {
+// 认领刚开起来的新会话：它一上报（带着一个我们开之前没见过的 id、目录也对得上），
+// 就把占位行撤掉、把目标切到它身上——之后发消息就走普通的「投递到终端」那条路。
+// 认领不到（hooks 没装 / 会话一开就退）也有时限兜底，占位不会永远钉着目标。
+function adoptPendingNewSession() {
+  const pending = quickPendingNewSession;
+  if (!pending || !pending.launched) return;
+  const before = quickSessionIdsBeforeLaunch || new Set();
+  const fresh = listQuickSessions().find((item) => !before.has(item.id)
+    && (!pending.folder || item.cwd === pending.folder));
+  if (fresh) {
+    quickPendingNewSession = null;
+    quickSessionIdsBeforeLaunch = null;
+    quickSelectedSessionId = fresh.id;
+    return;
+  }
+  if (pending.launchedAt && Date.now() - pending.launchedAt > PENDING_ADOPT_TIMEOUT_MS) {
+    sessionLog("Clawd: 新会话没等到上报，撤掉面板上的占位");
+    quickPendingNewSession = null;
+    quickSessionIdsBeforeLaunch = null;
+  }
+}
+
+function pushQuickState() {
   if (!_sessionHud || typeof _sessionHud.pushQuickState !== "function") return;
-  let state = null;
-  try { state = chatRuntime.getState(); } catch {}
-  if (state) _sessionHud.pushQuickState(buildQuickChatState(state));
+  _sessionHud.pushQuickState(buildQuickSendState());
 }
 
 const chatRuntime = createChatSessionRuntime({
@@ -1124,9 +1308,8 @@ const chatRuntime = createChatSessionRuntime({
   onUpdate: (state) => {
     if (chatIpcRuntime) chatIpcRuntime.pushUpdate(state);
     if (chatPromptQueue) chatPromptQueue.handleRuntimeState(state);
-    if (_sessionHud && typeof _sessionHud.pushQuickState === "function") {
-      _sessionHud.pushQuickState(buildQuickChatState(state));
-    }
+    // 面板已经不再连这个内置会话，但仍推一次状态：这一版里两者并存。
+    pushQuickState();
   },
   // 恢复历史会话前回填消息（阶段二）；chat-ipc 也会随 resumeSession 参数转交同一函数。
   loadBackfill: loadChatBackfill,
@@ -1141,7 +1324,7 @@ chatPromptQueue = createChatPromptQueue({
     try { return !!chatRuntime.getState().cwd; } catch { return false; }
   },
   // 队列计数变化（排队/发出/清空）也要刷给面板。
-  onChanged: () => pushQuickChatState(),
+  onChanged: () => pushQuickState(),
 });
 
 const permissionAutomationConfirmationRuntime = createPermissionAutomationConfirmationRuntime({
@@ -2158,7 +2341,7 @@ let getQuotaRingWindow = () => null;
 // 创建之后，在此之前读到空数组是安全的）。
 let getSessionHudBlockRects = () => [];
 // 面板二级设置菜单的展开状态（状态源在 session-hud；同样延迟赋值）。
-let getSessionHudMenuOpen = () => false;
+let getSessionHudListOpen = () => false;
 function getVisibleSessionHudBounds() {
   try {
     const rects = getSessionHudBlockRects();
@@ -2630,6 +2813,13 @@ const _stateCtx = {
   debugLog: (msg) => sessionLog(msg),
   broadcastSessionSnapshot: (snapshot) => {
     reconcilePowerSaveBlocker();
+    // 悬停面板的「正在发给谁」用同一份快照（hudLastSessionId = 最近活动的会话），
+    // 顺手推一次状态：会话切换/状态变化时面板上的目标名要跟着变。
+    lastSessionSnapshot = snapshot;
+    // 排好的新会话在终端里跑起来之后会带着新 id 出现在这份快照里，先认领它，
+    // 再把状态推给面板（占位行 → 真会话行）。
+    adoptPendingNewSession();
+    pushQuickState();
     broadcastDashboardSessionSnapshot(snapshot);
     broadcastSessionHudSnapshot(snapshot);
     repositionFloatingBubbles();
@@ -3158,7 +3348,7 @@ const _sessionHud = require("./session-hud")({
   reapplyMacVisibility,
   onReservedOffsetChange: () => repositionFloatingBubbles(),
   // 二级菜单开合 / 面板收起会重置它：投影里带着 menuOpen，状态一变就重推一次。
-  onQuickStateChanged: () => pushQuickChatState(),
+  onQuickStateChanged: () => pushQuickState(),
   // 「一条」版式：回复窗口开着且跟随中时返回它的高度，面板据此整体下移一半，
   // 让「回复窗口 + 面板」这条竖条以桌宠为中心（否则高窗口会顶出屏幕、压住卡片）。
   getAttachedReplyHeight: () => (
@@ -3212,7 +3402,7 @@ getSessionHudReservedOffset = _sessionHud.getHudReservedOffset;
 getSessionHudWindow = _sessionHud.getWindow;
 getSessionHudWindows = _sessionHud.getWindows;
 getSessionHudBlockRects = _sessionHud.getBlockRects;
-getSessionHudMenuOpen = () => !!(_sessionHud.isMenuOpen && _sessionHud.isMenuOpen());
+getSessionHudListOpen = () => !!(_sessionHud.isSessionListOpen && _sessionHud.isSessionListOpen());
 getQuotaRingWindow = _sessionHud.getQuotaRingWindow;
 
 agentRuntime = createAgentRuntimeMain({
@@ -5220,73 +5410,152 @@ const settingsIpcRuntime = registerSettingsIpc({
 // 后首推状态，并给粘贴图片提供系统临时目录；shell 用于打开外链（仅 http/https）；
 // getLang 决定弹窗与推送载荷的语言。
 // ── 悬停面板的快捷动作（session-ipc 转发到这里）──
-// 发消息：没有工作目录先走目录引导；忙时排队（chat-prompt-queue）；成功后
-// 打开对话窗口看回复。返回形状面向渲染端（ok/queued/full/error）。
+// 发消息：把文字投递到终端里最近活动的那个会话。返回形状面向渲染端，
+// status ∈ ok / copied / no-session / error，textKey 是要显示的文案 key
+// （渲染端查字典，主进程不拼自然语言）。
 async function quickSendPrompt(text) {
-  try {
-    if (!chatRuntime.getState().cwd) await promptChatWorkingDirIfMissing();
-  } catch {}
-  const result = await chatPromptQueue.enqueue(text);
-  if (result.status === "sent" || result.status === "queued") {
-    // 面板收起上闩（防指针还停在桌宠上立刻弹回），并打开对话窗口看输出。
-    if (_sessionHud && typeof _sessionHud.dismissForAction === "function") {
-      _sessionHud.dismissForAction();
-    }
-    try {
-      chatWindowRuntime.open();
-    } catch (err) {
-      console.warn("Clawd: 打开对话窗口失败:", err && err.message);
-    }
-    pushQuickChatState();
-    return {
-      status: result.status === "sent" ? "ok" : "queued",
-      queuedCount: result.queuedCount,
+  if (!sessionPromptSend) return { status: "error", textKey: "hudQuickSendFailed" };
+  const entry = resolveQuickTargetEntry();
+  if (entry && entry.kind === "pending") return sendToPendingNewSession(entry.pending, text);
+  const result = await sessionPromptSend.send({ text });
+  return {
+    status: result.status === "sent" ? "ok" : result.status,
+    textKey: result.textKey,
+  };
+}
+
+// 给「排好的新会话」发第一句话 = 现在才真的在终端里把它开起来，并把这句话
+// 一并交给 claude（命令是 `claude <两个开关> '<这句话>'`）。
+// 开起来之后占位行还留着（此刻会话本身还没进会话快照），等它上报了再认领；
+// 这中间的第二次发送返回 starting，让用户等一两秒——绝不把话发到别的会话里。
+async function sendToPendingNewSession(pending, text) {
+  if (pending.launched) return { status: "starting", textKey: "hudNewSessionStarting" };
+  if (!terminalAppSender || typeof terminalAppSender.openNewSession !== "function") {
+    return { status: "error", textKey: "hudNewSessionFailed" };
+  }
+  const folder = resolveQuickNewSessionFolder();
+  const knownIds = new Set(listQuickSessions().map((item) => item.id));
+  const result = await terminalAppSender.openNewSession({
+    folder,
+    args: buildNewSessionArgs({
+      permissionMode: quickNewSessionPermissionMode,
+      effort: quickNewSessionEffort,
+    }),
+    prompt: text,
+  });
+  if (result && result.status === "opened") {
+    pending.launched = true;
+    pending.folder = folder;
+    pending.launchedAt = Date.now();
+    quickSessionIdsBeforeLaunch = knownIds;
+    pushQuickState();
+    return { status: "ok", textKey: "hudNewSessionStarted" };
+  }
+  if (result && result.status === "unauthorized") {
+    // 还没允许「控制终端」：把话留在剪贴板里，让用户去终端自己粘贴，
+    // 占位行保持原样，允许之后还能再发一次。
+    const copied = copyPromptToClipboard(text);
+    return { status: copied ? "copied" : "error", textKey: "hudSendNeedsPermission" };
+  }
+  return { status: "error", textKey: "hudNewSessionFailed" };
+}
+
+// 面板里手选目标会话（点会话列表某一行）。只认字符串 id，且必须是当前活着的
+// 会话（或那个排好的新会话占位）——渲染端的列表可能已经过期。
+function quickSelectSession(sessionId) {
+  const id = typeof sessionId === "string" ? sessionId : "";
+  if (!id) return { status: "error", message: "invalid session id" };
+  if (quickPendingNewSession && quickPendingNewSession.id === id) {
+    // 点占位行：把目标让回给它（清掉手选的会话）。
+    quickSelectedSessionId = null;
+    pushQuickState();
+    return { status: "ok" };
+  }
+  const exists = listQuickSessions().some((item) => item.id === id);
+  if (!exists) return { status: "error", message: "unknown session" };
+  quickSelectedSessionId = id;
+  pushQuickState();
+  return { status: "ok" };
+}
+
+// 「＋ 在终端里新建会话」：只在列表里排一个位，先不开终端。等第一句话发出去，
+// 才真在终端里开起来（见 sendToPendingNewSession）。再点一次是重新排一个
+// （同时只会有一个），取消走占位行右边的 ✕。
+function quickCreateSession() {
+  if (process.platform !== "darwin") return { status: "error", textKey: "hudNewSessionFailed" };
+  if (!quickPendingNewSession) {
+    quickPendingSeq += 1;
+    quickPendingNewSession = {
+      id: `pending:${quickPendingSeq}`,
+      launched: false,
+      folder: null,
+      launchedAt: 0,
     };
   }
-  if (result.status === "full") return { status: "full", queuedCount: result.queuedCount };
-  return { status: "error", message: "empty prompt" };
+  // 刚排的新会话就是要发的地方：让开手选的那个会话。
+  quickSelectedSessionId = null;
+  pushQuickState();
+  return { status: "ok", textKey: "hudNewSessionQueued" };
 }
 
-// 切 effort 会重置会话上下文（等于杀掉当前回合）：忙碌或还有排队时拒绝，
-// 不信渲染端的禁用状态，主进程二次把关。
-async function quickSetEffort(value) {
-  const state = chatRuntime.getState();
-  if (state.busy || chatPromptQueue.getSnapshot().count > 0) {
-    return { status: "error", message: "busy" };
-  }
-  const ok = await chatRuntime.setEffort(value);
-  pushQuickChatState();
-  return ok ? { status: "ok" } : { status: "error", message: "invalid effort" };
-}
-
-async function quickSetPermissionMode(value) {
-  const ok = await chatRuntime.setPermissionMode(value);
-  pushQuickChatState();
-  return ok ? { status: "ok" } : { status: "error", message: "invalid permission mode" };
-}
-
-async function quickPickWorkingDir() {
-  return pickChatWorkingDir();
-}
-
-function quickStopChat() {
-  // 必须先清队再 stop：stop 回到 idle 的边沿会触发排队器放行下一条。
-  clearQueueForContextReset("user-stop");
-  try { chatRuntime.stop(); } catch {}
-  pushQuickChatState();
+// 取消排好的新会话（占位行右边的 ✕）。
+function quickCancelPendingSession() {
+  quickPendingNewSession = null;
+  quickSessionIdsBeforeLaunch = null;
+  pushQuickState();
   return { status: "ok" };
 }
 
-function quickSetMenuOpen(open) {
-  if (!_sessionHud || typeof _sessionHud.setMenuOpen !== "function") {
-    return { status: "error", reason: "quick-panel-unavailable" };
+// 面板里切换「新建会话」的两个开关。只认允许列表里的值（渲染端给什么都可能），
+// 不认的一律落到默认档。
+function quickSetNewSessionOption(key, value) {
+  if (key === "permissionMode") {
+    quickNewSessionPermissionMode = normalizePermissionMode(value);
+  } else if (key === "effort") {
+    quickNewSessionEffort = normalizeEffort(value);
+  } else {
+    return { status: "error", message: "unknown option" };
   }
-  _sessionHud.setMenuOpen(open === true);
-  pushQuickChatState();
+  pushQuickState();
   return { status: "ok" };
+}
+
+// 选「新建会话」落在哪个文件夹（系统文件夹选择框）。选中后只改内存里的值，
+// 下一次新建会话就开在那儿。
+async function quickPickNewSessionFolder() {
+  if (process.platform !== "darwin") return { status: "unsupported" };
+  // 系统对话框一弹出来，指针必然离开卡片：先把面板钉住，别让它在用户挑目录
+  // 的时候自己收起（"dialog" 这个理由由主进程自己加、自己撤，不从渲染端来）。
+  quickSetHold("dialog", true);
+  let result = null;
+  try {
+    result = await dialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"] });
+  } catch (err) {
+    console.warn("Clawd: 选择新建会话目录失败:", err && err.message);
+    return { status: "error", message: err && err.message };
+  } finally {
+    quickSetHold("dialog", false);
+  }
+  const picked = result && !result.canceled && Array.isArray(result.filePaths)
+    ? result.filePaths[0]
+    : null;
+  if (!picked) return { status: "canceled" };
+  quickNewSessionFolder = picked;
+  pushQuickState();
+  return { status: "ok", folder: picked };
 }
 
 // 渲染端上报指针进出卡片：卡片外的透明区让点击穿透（主进程轮询另有兜底）。
+// 会话列表展开/收起（点状态行）。
+function quickSetListOpen(open) {
+  if (!_sessionHud || typeof _sessionHud.setSessionListOpen !== "function") {
+    return { status: "error", reason: "quick-panel-unavailable" };
+  }
+  _sessionHud.setSessionListOpen(open === true);
+  pushQuickState();
+  return { status: "ok" };
+}
+
 function quickSetClickThrough(through) {
   if (_sessionHud && typeof _sessionHud.setClickThrough === "function") {
     _sessionHud.setClickThrough(through === true);
@@ -5339,18 +5608,20 @@ registerSessionIpc({
   // 悬停面板要用 chat 字典（effort/权限模式文案），合并载荷对 Dashboard 无副作用。
   getI18n: () => getHudI18nPayload(),
   getDashboardWebContents: () => _dashboard.getWebContents(),
-  // 快捷输入面板的信任闸门与动作（发消息/切设置/选目录/停止/保持显示）。
+  // 快捷输入面板的信任闸门与动作（发消息 / 选会话 / 新建会话 / 选文件夹 /
+  // 展开列表 / 保持显示 / 点击穿透）。
   getSessionHudWebContents: () => {
     const hudWin = getSessionHudWindow();
     return hudWin && !hudWin.isDestroyed() ? hudWin.webContents : null;
   },
   quickSendPrompt,
-  quickSetEffort,
-  quickSetPermissionMode,
-  quickPickWorkingDir,
-  quickStopChat,
+  quickSelectSession,
+  quickCreateSession,
+  quickCancelPendingSession,
+  quickPickFolder: quickPickNewSessionFolder,
+  quickSetNewSessionOption,
+  quickSetListOpen,
   quickSetHold,
-  quickSetMenuOpen,
   quickSetClickThrough,
   quickMode: _dashboard.quick,
   getKimiQuotaStatus: () => _kimiQuotaRuntime.getStatus(),
@@ -5495,7 +5766,7 @@ function createWindow() {
   syncSessionHudVisibility();
   // 面板 footer 的状态要先推一次初始值（effort/权限模式/目录名）：
   // 只靠 onUpdate 的话，聊天会话没动静前渲染端一直显示硬编码兜底值。
-  pushQuickChatState();
+  pushQuickState();
 
   registerPetInteractionIpc({
     ipcMain,

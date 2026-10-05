@@ -2,13 +2,12 @@
 
 // 快捷面板（点击桌宠弹出）——单个整块窗口，默认贴桌宠左侧（放不下自动换
 // 右侧、再放不下落桌宠下方）：
-//   状态行 + 「权限模式 · effort」按钮 + 工作文件夹行 + 输入框（+ 停止按钮）
-// 点按钮展开二级设置菜单（权限模式列表 + effort 滑块），卡片随之变高
-// （QUICK_CARD → QUICK_CARD_EXPANDED，主进程按展开态重算窗口尺寸；
-//  底边钉住、只向上长，观感像拉开一个抽屉）。
+//   状态行（这句话会发给终端里哪个会话）+ 输入框
+// 输入的话由主进程投递到终端 App 里那个正在运行的 CLI 会话——真正的对话
+// 仍然发生在终端里，这里只是个远程输入框。
 // 外加可选的配额环（quota-ring.html，独立小窗，原逻辑保留）。
 //
-// 活跃会话列表已删除（产品决定：不显示会话状态）。生命周期沿用原 HUD 契约：
+// 生命周期沿用原 HUD 契约：
 // - 单击桌宠 → revealFromPet()（hit-renderer 单击经 IPC 调到这里）
 // - 轮询盯「指针离开热区 + 500ms 宽限」自动收起；拖拽 / 右键菜单 / mini 立即收
 // - 输入框聚焦 / 有草稿（holdReasons）时面板不收起
@@ -16,8 +15,8 @@
 // - 面板打开期间漫游由 roam 侧读 isPanelOpen() 暂停（见 roam.js）
 //
 // 卡片尺寸/窗口壳常量必须与 session-hud.html 的 CSS 严格一致：
-//   收起 300×134 / 展开 300×316（二级菜单 182px）
-//   + 壳 top2/right3/bottom60(输入法候选窗净空)/left3 → 窗口 306×196 / 306×378
+//   卡片 300×66（状态行 16 + 行距 4 + 输入行 32 + 内边距 12 + 边框 2）
+//   + 壳 top2/right3/bottom60(输入法候选窗净空)/left3 → 窗口 306×128
 
 const { BrowserWindow, screen } = require("electron");
 const path = require("path");
@@ -30,10 +29,13 @@ const isLinux = process.platform === "linux";
 const isMac = process.platform === "darwin";
 const isWin = process.platform === "win32";
 
-// 收起态：菜单高度 0，但仍算一个 4px 行距，6+16+4+28+4+0+4+28+4+32+6+2 = 134。
-const QUICK_CARD = Object.freeze({ width: 300, height: 134 });
-// 展开二级设置菜单后：菜单 0 → 182，即 134 + 182 = 316。
-const QUICK_CARD_EXPANDED = Object.freeze({ width: 300, height: 316 });
+// 卡片默认两行：状态行（16）+ 行距（4）+ 输入行（32），
+// 6 + 16 + 4 + 32 + 6 + 2 = 66。
+const QUICK_CARD = Object.freeze({ width: 300, height: 66 });
+// 点状态行展开会话列表，列表区从上到下：最多 4 条会话（各 28）＋ 新建会话（28）
+// ＋ 权限模式（34）＋ 思考强度（34）＋ 选文件夹（28），行距一律 2：
+// 4×28 + 28 + 34 + 34 + 28 + 7×2 = 250，再加一个卡片行距 4 → 66 + 250 + 4 = 320。
+const QUICK_CARD_EXPANDED = Object.freeze({ width: 300, height: 320 });
 // 底部 60px 是输入法候选窗的净空：太小的话 macOS 会认为「光标下面放不下」，
 // 把候选窗翻到输入框上方，结果被卡片盖住。
 const QUICK_SHELL = Object.freeze({ top: 2, right: 3, bottom: 60, left: 3 });
@@ -287,14 +289,14 @@ module.exports = function initSessionHud(ctx) {
   let revealed = false;
   const holdReasons = new Set();
   let visibleHoldUntil = 0;
+  // 会话列表是否展开：展开时卡片更高，且 holdReasons 里钉一个 "menu"
+  // 让面板不被自动收起（用户正在挑会话）。
+  let sessionListOpen = false;
   // 回复窗口的自动消失状态：replyRevealed = 我们让它显示；replyHoldUntil =
   // 宽限/「刚回复完」的停留截止时间；replyWasBusy 用来识别「回复刚结束」这个边沿。
   let replyRevealed = false;
   let replyHoldUntil = 0;
   let replyWasBusy = false;
-  // 二级设置菜单（权限模式 + effort 滑块）是否展开：展开时卡片更高，
-  // 且 holdReasons 里钉一个 "menu" 让面板不被自动收起。
-  let expanded = false;
   // 快捷面板的状态投影（effort/权限/忙碌/排队数…），主进程推来后转发面板窗口。
   let latestQuickState = null;
   let lastQuickStateJson = null;
@@ -371,22 +373,6 @@ module.exports = function initSessionHud(ctx) {
     return !!(ringWindow && !ringWindow.isDestroyed() && ringWindow.isVisible());
   }
 
-  // 二级设置菜单展开/收起：主进程是唯一状态源（渲染端只投影），
-  // 因为窗口高度要跟着变——渲染端自己做状态会跟窗口尺寸脱节。
-  function setMenuOpen(open) {
-    const next = open === true;
-    if (next === expanded) return;
-    expanded = next;
-    if (next) holdReasons.add("menu");
-    else holdReasons.delete("menu");
-    syncSessionHud(latestSnapshot || getCurrentSnapshot(), {});
-    if (typeof ctx.onQuickStateChanged === "function") ctx.onQuickStateChanged();
-  }
-
-  function isMenuOpen() {
-    return expanded;
-  }
-
   // 渲染端报告「不能收起」的原因（输入框聚焦、有草稿）。
   function setHold(reason, held) {
     if (typeof reason !== "string" || !reason) return;
@@ -402,7 +388,8 @@ module.exports = function initSessionHud(ctx) {
     }
   }
 
-  // 主进程把聊天会话状态投影推过来（effort/权限/忙碌/排队数/目录名）。
+  // 主进程把面板状态投影推过来（有哪些会话可选、当前发给谁、能不能新建、
+  // 新会话开在哪个目录、列表是否展开）。
   function pushQuickState(projection) {
     latestQuickState = projection && typeof projection === "object" ? projection : null;
     sendQuickState();
@@ -495,7 +482,7 @@ module.exports = function initSessionHud(ctx) {
     const panelLayout = computeBlockBounds({
       hitRect, anchorRect: stackedAnchorRect, workArea,
       cardW: QUICK_CARD.width,
-      cardH: expanded ? QUICK_CARD_EXPANDED.height : QUICK_CARD.height,
+      cardH: sessionListOpen ? QUICK_CARD_EXPANDED.height : QUICK_CARD.height,
       // 展开态以收起态的底边为基准向上长（只向上延伸，不向下撑）
       baseCardH: QUICK_CARD.height,
       shell: QUICK_SHELL, prefer: "left", scale, widthScale,
@@ -1140,10 +1127,10 @@ module.exports = function initSessionHud(ctx) {
   }
 
   function hidePanel() {
-    // 面板一收，二级菜单必须跟着复位：下次点桌宠应是收起态。否则窗口按
+    // 面板一收，会话列表必须跟着复位：下次点桌宠应是收起态。否则窗口按
     // 收起高度算、渲染端还画着展开卡片，内容会被裁掉。
-    if (expanded) {
-      expanded = false;
+    if (sessionListOpen) {
+      sessionListOpen = false;
       holdReasons.delete("menu");
       if (typeof ctx.onQuickStateChanged === "function") ctx.onQuickStateChanged();
     }
@@ -1176,6 +1163,22 @@ module.exports = function initSessionHud(ctx) {
     if (anyVisible === lastAnyVisible) return;
     lastAnyVisible = anyVisible;
     if (typeof ctx.onReservedOffsetChange === "function") ctx.onReservedOffsetChange();
+  }
+
+  // 会话列表展开/收起：主进程是唯一状态源（渲染端只投影），因为窗口高度要
+  // 跟着变——渲染端自己做状态会跟窗口尺寸脱节。
+  function setSessionListOpen(open) {
+    const next = open === true;
+    if (next === sessionListOpen) return;
+    sessionListOpen = next;
+    if (next) holdReasons.add("menu");
+    else holdReasons.delete("menu");
+    syncSessionHud(latestSnapshot || getCurrentSnapshot(), {});
+    if (typeof ctx.onQuickStateChanged === "function") ctx.onQuickStateChanged();
+  }
+
+  function isSessionListOpen() {
+    return sessionListOpen;
   }
 
   // 回复窗口跟随时的高度（0 = 没开窗口、或不在跟随模式）。面板据此给整条让位：
@@ -1322,7 +1325,7 @@ module.exports = function initSessionHud(ctx) {
     cancelPanelFade();
     pendingHiddenBounds = null;
     clickThrough = null;
-    expanded = false;
+    sessionListOpen = false;
     holdReasons.delete("menu");
     const win = panel.win;
     if (win && !win.isDestroyed()) win.destroy();
@@ -1342,6 +1345,8 @@ module.exports = function initSessionHud(ctx) {
     getHudReservedOffset,
     getBlockRects,
     getPanelCardRect,
+    setSessionListOpen,
+    isSessionListOpen,
     noteReplyWindowStateChanged,
     cleanup,
     getWindow: () => panel.win,
@@ -1358,8 +1363,6 @@ module.exports = function initSessionHud(ctx) {
     // 快捷输入面板 API
     dismissForAction,
     setHold,
-    setMenuOpen,
-    isMenuOpen,
     setClickThrough,
     pushQuickState,
     isPanelOpen,

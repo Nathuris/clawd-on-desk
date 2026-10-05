@@ -84,18 +84,23 @@ function createHarness(overrides = {}) {
     : {
         quickSendPrompt: overrides.quickSendPrompt
           || ((text) => { calls.push(["quickSendPrompt", text]); return { status: "ok" }; }),
-        quickSetEffort: overrides.quickSetEffort
-          || ((value) => { calls.push(["quickSetEffort", value]); return { status: "ok" }; }),
-        quickSetPermissionMode: overrides.quickSetPermissionMode
-          || ((value) => { calls.push(["quickSetPermissionMode", value]); return { status: "ok" }; }),
-        quickPickWorkingDir: overrides.quickPickWorkingDir
-          || (() => { calls.push(["quickPickWorkingDir"]); return { status: "ok" }; }),
-        quickStopChat: overrides.quickStopChat
-          || (() => { calls.push(["quickStopChat"]); return { status: "ok" }; }),
+        quickSelectSession: overrides.quickSelectSession
+          || ((sessionId) => { calls.push(["quickSelectSession", sessionId]); return { status: "ok" }; }),
+        quickCreateSession: overrides.quickCreateSession
+          || (() => { calls.push(["quickCreateSession"]); return { status: "ok" }; }),
+        quickCancelPendingSession: overrides.quickCancelPendingSession
+          || (() => { calls.push(["quickCancelPendingSession"]); return { status: "ok" }; }),
+        quickPickFolder: overrides.quickPickFolder
+          || (() => { calls.push(["quickPickFolder"]); return { status: "ok" }; }),
+        quickSetNewSessionOption: overrides.quickSetNewSessionOption
+          || ((key, value) => {
+            calls.push(["quickSetNewSessionOption", key, value]);
+            return { status: "ok" };
+          }),
+        quickSetListOpen: overrides.quickSetListOpen
+          || ((open) => { calls.push(["quickSetListOpen", open]); return { status: "ok" }; }),
         quickSetHold: overrides.quickSetHold
           || ((reason, held) => { calls.push(["quickSetHold", reason, held]); }),
-        quickSetMenuOpen: overrides.quickSetMenuOpen
-          || ((open) => { calls.push(["quickSetMenuOpen", open]); return { status: "ok" }; }),
         quickSetClickThrough: overrides.quickSetClickThrough
           || ((through) => { calls.push(["quickSetClickThrough", through]); }),
       };
@@ -213,13 +218,14 @@ test("session IPC registers owned channels and disposes them", () => {
     "dashboard:resume-session",
     "dashboard:set-session-alias",
     "dashboard:set-session-automation",
+    "session-hud:cancel-pending-session",
     "session-hud:get-i18n",
-    "session-hud:pick-working-dir",
+    "session-hud:new-session",
+    "session-hud:pick-folder",
+    "session-hud:select-session",
     "session-hud:send-prompt",
-    "session-hud:set-effort",
-    "session-hud:set-menu-open",
-    "session-hud:set-permission-mode",
-    "session-hud:stop-chat",
+    "session-hud:set-list-open",
+    "session-hud:set-new-session-option",
     "session:ack-completion",
   ]);
   assert.deepStrictEqual([...ipcMain.listeners.keys()].sort(), [
@@ -613,10 +619,10 @@ test("main forwards dashboard open source options into session IPC", () => {
   );
 });
 
-// ── 悬停快捷面板（阶段一）：发消息 / 切 effort / 切权限模式 / 选目录 / 停止 / 保持显示 ──
+// ── 悬停快捷面板：发消息 / 选会话 / 新建会话 / 选文件夹 / 保持显示 ──
 //
-// 这些通道会花钱（send-prompt）或重置会话上下文（set-effort / set-permission-mode /
-// pick-working-dir），信任闸门与载荷校验都必须挡在 owner 之前。
+// 这些通道会往终端里的真实会话投递文字、在终端里开进程、弹系统对话框，
+// 信任闸门与载荷校验都必须挡在 owner 之前。
 
 test("快捷面板通道只认 HUD 主 frame，伪造 sender 一律 untrusted-hud-sender", async () => {
   const { ipcMain, calls, trustedHudEvent, hudWebContents, hudMainFrame } = createHarness();
@@ -632,10 +638,6 @@ test("快捷面板通道只认 HUD 主 frame，伪造 sender 一律 untrusted-hu
   // 合法请求形状（非法载荷另有校验分支，不能拿来测闸门）。
   const wellFormed = [
     ["session-hud:send-prompt", { text: "hi" }],
-    ["session-hud:set-effort", { value: "high" }],
-    ["session-hud:set-permission-mode", { value: "plan" }],
-    ["session-hud:pick-working-dir", undefined],
-    ["session-hud:stop-chat", undefined],
   ];
 
   const forgedEvents = [
@@ -706,157 +708,109 @@ test("send-prompt 的文本闸门：空文本与超长文本拦在 owner 之前"
   assert.deepStrictEqual(calls, [["quickSendPrompt", edge]]);
 });
 
-test("set-effort / set-permission-mode 只接受契约枚举值", async () => {
+test("quick* 依赖未注入时 send-prompt 回 quick-panel-unavailable", async () => {
+  const { ipcMain, calls, trustedHudEvent } = createHarness({ quickDeps: false });
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:send-prompt", { text: "hi" }),
+    { status: "error", reason: "quick-panel-unavailable" }
+  );
+  assert.deepStrictEqual(calls, []);
+});
+
+test("select-session 的载荷闸门：只认非空字符串 id", async () => {
   const { ipcMain, calls, trustedHudEvent } = createHarness();
 
-  for (const bad of [undefined, null, 42, "wild", {}, { value: "WILD" }, { value: 42 }]) {
-    const result = await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-effort", bad);
-    assert.strictEqual(result.status, "error", `set-effort 必须拒绝 ${JSON.stringify(bad)}`);
-    assert.match(result.message, /invalid effort/);
+  for (const bad of [undefined, null, {}, { sessionId: "" }, { sessionId: 42 }, "s1"]) {
+    const result = await ipcMain.invokeFrom(trustedHudEvent, "session-hud:select-session", bad);
+    assert.strictEqual(result.status, "error", `必须拒绝载荷 ${JSON.stringify(bad)}`);
+    assert.match(result.message, /empty session id/);
   }
-  for (const value of ["low", "medium", "high", "xhigh", "max"]) {
-    assert.deepStrictEqual(
-      await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-effort", { value }),
-      { status: "ok" },
-      value
-    );
-    assert.deepStrictEqual(calls.at(-1), ["quickSetEffort", value]);
-  }
+  assert.deepStrictEqual(calls, [], "非法 id 不得触达 owner");
 
-  for (const bad of [undefined, null, 42, "yolo", {}, { value: "Auto" }, { value: 42 }]) {
-    const result = await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-permission-mode", bad);
-    assert.strictEqual(result.status, "error", `set-permission-mode 必须拒绝 ${JSON.stringify(bad)}`);
-    assert.match(result.message, /invalid permission mode/);
-  }
-  for (const value of ["default", "acceptEdits", "plan", "auto"]) {
-    assert.deepStrictEqual(
-      await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-permission-mode", { value }),
-      { status: "ok" },
-      value
-    );
-    assert.deepStrictEqual(calls.at(-1), ["quickSetPermissionMode", value]);
-  }
-
-  // 非法值全部拦下之后，只有合法枚举触达过 owner。
-  assert.strictEqual(
-    calls.filter(([name]) => name === "quickSetEffort").length,
-    5
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:select-session", { sessionId: "s1" }),
+    { status: "ok" }
   );
-  assert.strictEqual(
-    calls.filter(([name]) => name === "quickSetPermissionMode").length,
-    4
-  );
+  assert.deepStrictEqual(calls, [["quickSelectSession", "s1"]]);
 });
 
-test("set-hold 把 reason/held 交给 quickSetHold，空 reason 与伪造 sender 不触发", async () => {
+test("set-new-session-option 的载荷闸门：键与值都必须在允许表里", async () => {
+  const { ipcMain, calls, trustedHudEvent } = createHarness();
+
+  const bad = [
+    undefined,
+    null,
+    [],
+    "permissionMode",
+    { key: "permissionMode" },
+    { value: "low" },
+    { key: "permissionMode", value: "low", extra: 1 },
+    { key: "nope", value: "default" },
+    // 值对了但键不对：这两个值分属不同的表，不能互相串。
+    { key: "permissionMode", value: "low" },
+    { key: "effort", value: "plan" },
+    // 跳过权限确认那档不在面板的允许表里。
+    { key: "permissionMode", value: "bypassPermissions" },
+    // 注入形状的值。
+    { key: "effort", value: "high; rm -rf /" },
+    { key: "effort", value: "" },
+  ];
+  for (const payload of bad) {
+    const result = await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-new-session-option", payload);
+    assert.deepStrictEqual(result, { status: "invalid" }, JSON.stringify(payload));
+  }
+  assert.deepStrictEqual(calls, [], "非法载荷不得触达 owner");
+
+  // 允许表里的组合照常放行。
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-new-session-option", {
+      key: "permissionMode",
+      value: "plan",
+    }),
+    { status: "ok" }
+  );
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-new-session-option", {
+      key: "effort",
+      value: "high",
+    }),
+    { status: "ok" }
+  );
+  assert.deepStrictEqual(calls, [
+    ["quickSetNewSessionOption", "permissionMode", "plan"],
+    ["quickSetNewSessionOption", "effort", "high"],
+  ]);
+});
+
+test("new-session / pick-folder 只认 HUD 主 frame", async () => {
   const { ipcMain, calls, trustedHudEvent, hudWebContents, hudMainFrame } = createHarness();
 
-  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-hold", { reason: "focus", held: true });
-  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-hold", { reason: "draft", held: 0 });
-  assert.deepStrictEqual(calls, [
-    ["quickSetHold", "focus", true],
-    ["quickSetHold", "draft", false],
-  ]);
-
-  // 没有 reason 的载荷不触发（held 永远布尔化）。
-  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-hold", { reason: "", held: true });
-  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-hold", { held: true });
-  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-hold", "focus");
-  assert.strictEqual(calls.length, 2);
-
-  // 伪造 sender 不触发。
-  ipcMain.sendFrom({ sender: {}, senderFrame: hudMainFrame }, "session-hud:set-hold", {
-    reason: "focus",
-    held: true,
-  });
-  ipcMain.sendFrom({ sender: hudWebContents, senderFrame: { ...hudMainFrame } }, "session-hud:set-hold", {
-    reason: "focus",
-    held: true,
-  });
-  assert.strictEqual(calls.length, 2);
-});
-
-test("set-menu-open 只收布尔载荷，展开/收起都走 quickSetMenuOpen", async () => {
-  const { ipcMain, calls, trustedHudEvent, hudMainFrame } = createHarness();
-
   assert.deepStrictEqual(
-    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-menu-open", { open: true }),
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:new-session"),
     { status: "ok" }
   );
   assert.deepStrictEqual(
-    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-menu-open", { open: false }),
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:pick-folder"),
     { status: "ok" }
   );
-  // 非布尔载荷一律当 false：菜单状态不能被"真值串"之类的值点亮。
   assert.deepStrictEqual(
-    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-menu-open", { open: "yes" }),
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:cancel-pending-session"),
     { status: "ok" }
   );
-  assert.deepStrictEqual(calls, [
-    ["quickSetMenuOpen", true],
-    ["quickSetMenuOpen", false],
-    ["quickSetMenuOpen", false],
-  ]);
+  assert.deepStrictEqual(calls, [["quickCreateSession"], ["quickPickFolder"], ["quickCancelPendingSession"]]);
   calls.length = 0;
 
-  // 伪造 sender 不生效（与其它 HUD 通道同一道闸门）。
-  assert.deepStrictEqual(
-    await ipcMain.invokeFrom(
-      { sender: {}, senderFrame: hudMainFrame },
-      "session-hud:set-menu-open",
-      { open: true }
-    ),
-    { status: "error", reason: "untrusted-hud-sender" }
-  );
-  assert.deepStrictEqual(calls, []);
-});
-
-test("set-click-through 只认 HUD 主 frame，布尔化后交给 quickSetClickThrough", () => {
-  const { ipcMain, calls, trustedHudEvent, hudMainFrame } = createHarness();
-
-  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-click-through", { through: true });
-  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-click-through", { through: false });
-  // 非严格 true 一律按 false：穿透状态不能被奇怪的值打开
-  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-click-through", { through: "yes" });
-  assert.deepStrictEqual(calls, [
-    ["quickSetClickThrough", true],
-    ["quickSetClickThrough", false],
-    ["quickSetClickThrough", false],
-  ]);
-  calls.length = 0;
-
-  ipcMain.sendFrom({ sender: {}, senderFrame: hudMainFrame }, "session-hud:set-click-through", { through: true });
-  assert.deepStrictEqual(calls, []);
-});
-
-test("quick* 依赖未注入时 pick-working-dir / stop-chat 回 quick-panel-unavailable", async () => {
-  const { ipcMain, calls, trustedHudEvent } = createHarness({ quickDeps: false });
-
-  for (const channel of ["session-hud:pick-working-dir", "session-hud:stop-chat"]) {
+  const forged = { sender: hudWebContents, senderFrame: { ...hudMainFrame } };
+  for (const channel of [
+    "session-hud:new-session",
+    "session-hud:cancel-pending-session",
+    "session-hud:pick-folder",
+  ]) {
     assert.deepStrictEqual(
-      await ipcMain.invokeFrom(trustedHudEvent, channel),
-      { status: "error", reason: "quick-panel-unavailable" },
+      await ipcMain.invokeFrom(forged, channel),
+      { status: "error", reason: "untrusted-hud-sender" },
       channel
     );
   }
-  assert.deepStrictEqual(calls, []);
+  assert.deepStrictEqual(calls, [], "伪造 sender 不得在终端里开会话、更不得弹系统对话框");
 });
-
-test(
-  "quick* 依赖未注入时 send-prompt / set-effort / set-permission-mode 同样回 quick-panel-unavailable",
-  async () => {
-    const { ipcMain, calls, trustedHudEvent } = createHarness({ quickDeps: false });
-    for (const [channel, arg] of [
-      ["session-hud:send-prompt", { text: "hi" }],
-      ["session-hud:set-effort", { value: "high" }],
-      ["session-hud:set-permission-mode", { value: "plan" }],
-    ]) {
-      assert.deepStrictEqual(
-        await ipcMain.invokeFrom(trustedHudEvent, channel, arg),
-        { status: "error", reason: "quick-panel-unavailable" },
-        channel
-      );
-    }
-    assert.deepStrictEqual(calls, []);
-  }
-);

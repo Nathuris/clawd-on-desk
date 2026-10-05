@@ -162,35 +162,18 @@ describe("pet-attached quota ring", () => {
 });
 
 describe("快捷面板整卡（视觉外壳）", () => {
-  it("卡片总高 134px，壳底留 30px 输入法净空", () => {
+  it("卡片高 66px：状态行 + 行距 + 输入行，壳底留 60px 输入法净空", () => {
     // 主进程按「卡片 + 壳」算窗口尺寸（见 src/session-hud.js 顶部注释）：
-    // 6+16+4+28+4+0+4+28+4+32+6+2 = 134；窗口高 = 134 + 2 + 60 = 196。
+    // 6+16+4+32+6+2 = 66；窗口高 = 66 + 2 + 60 = 128。
     assert.match(sessionHudHtml, /body \{[\s\S]*?padding:\s*2px 3px 60px;[\s\S]*?\}/);
-    assert.match(sessionHudHtml, /\.quick-card \{ height: 134px; \}/);
+    assert.match(sessionHudHtml, /\.quick-card \{ height: 66px; \}/);
   });
 
-  it("展开/收起有高度过渡，卡片贴底排列（只向上长）", () => {
-    // 卡片底边对齐窗口底部：窗口为展开变高时，卡片底边不动、只往上长。
+  it("卡片贴底排列（窗口变高时只往上长）", () => {
     assert.match(sessionHudHtml, /#hud \{[\s\S]*align-items:\s*flex-end;[\s\S]*\}/);
     assert.match(sessionHudHtml, /#hud \{[\s\S]*height:\s*100%;[\s\S]*\}/);
-    assert.match(sessionHudHtml, /\.quick-card \{[\s\S]*transition:\s*height\s+0\.18s\s+ease;[\s\S]*\}/);
-    // 高度过渡靠 overflow:hidden 裁切菜单内容，才像拉开抽屉
     assert.match(sessionHudHtml, /\.quick-card \{[\s\S]*overflow:\s*hidden;[\s\S]*\}/);
-    // 菜单同款过渡且收起用高度 0（不是 display:none，否则内容瞬间消失会"闪"）
-    const menuRule = sessionHudHtml.match(/\.quick-menu \{\n  display: flex;[\s\S]*?\n\}/);
-    assert.ok(menuRule, ".quick-menu 规则缺失");
-    assert.match(menuRule[0], /height:\s*0;/);
-    assert.doesNotMatch(menuRule[0], /display:\s*none/);
-    assert.match(menuRule[0], /transition:\s*height\s+0\.18s\s+ease;/);
-    assert.match(sessionHudHtml, /body\.menu-open \.quick-menu \{ height: 182px; \}/);
-    // 减少动态效果偏好下不加过渡
-    assert.match(
-      sessionHudHtml,
-      /@media \(prefers-reduced-motion: reduce\) \{\s*\n\s*\.quick-card,\s*\n\s*\.quick-menu \{ transition: none; \}/
-    );
-    // 缩窗不再依赖任何计时：渲染端只负责 CSS 过渡，主进程等窗口隐藏后才缩
-    // （见 session-hud.test.js 的 applyPanelBounds 用例）。
-    assert.match(sessionHudHtml, /transition: height 0\.18s ease/);
+    // 缩窗不依赖任何计时：渲染端只负责 CSS，主进程等窗口隐藏后才缩
     assert.doesNotMatch(sessionHudJs, /PANEL_RESIZE|panelResizeTimer/);
   });
 
@@ -201,26 +184,10 @@ describe("快捷面板整卡（视觉外壳）", () => {
     assert.match(sessionHudHtml, /\.quick-card \{[\s\S]*border:\s*1px solid var\(--hud-border\);[\s\S]*\}/);
   });
 
-  it("行件固定高度与算式一致：状态 16 / 等级按钮 28 / 菜单 182 / 文件夹 28 / 输入 32", () => {
+  it("行件固定高度与算式一致：状态 16 / 输入 32", () => {
     assert.match(sessionHudHtml, /\.quick-status-row \{[\s\S]*height:\s*16px;[\s\S]*\}/);
-    assert.match(sessionHudHtml, /\.quick-level-btn \{[\s\S]*height:\s*28px;[\s\S]*\}/);
-    assert.match(sessionHudHtml, /body\.menu-open \.quick-menu \{ height: 182px; \}/);
-    assert.match(sessionHudHtml, /\.quick-folder-btn \{[\s\S]*height:\s*28px;[\s\S]*\}/);
     assert.match(sessionHudHtml, /\.quick-input-row \{[\s\S]*height:\s*32px;[\s\S]*\}/);
-  });
-
-  it("二级菜单内部算式：模式列表 142 + 行距 4 + 滑块区 36 = 182", () => {
-    // 4 个模式项各 34px + 3 个 2px 间距 = 142
-    assert.match(sessionHudHtml, /\.quick-mode-option \{[\s\S]*height:\s*34px;[\s\S]*\}/);
-    assert.match(sessionHudHtml, /\.quick-menu-modes \{[\s\S]*gap:\s*2px;[\s\S]*\}/);
-    // 滑块区 = 标签行 12 + 4 + 滑轨 20 = 36
-    assert.match(sessionHudHtml, /\.quick-effort-head \{[\s\S]*height:\s*12px;[\s\S]*\}/);
-    assert.match(sessionHudHtml, /\.quick-effort-range \{[\s\S]*height:\s*20px;[\s\S]*\}/);
-    assert.strictEqual(4 * 34 + 3 * 2, 142);
-    assert.strictEqual(12 + 4 + 20, 36);
-    // 列表 + 行距 4 + 滑块区 = 182，与 .quick-menu 的 flex-basis 一致
-    assert.strictEqual(142 + 36 + 4, 182);
-    assert.match(sessionHudHtml, /\.quick-menu \{[\s\S]*gap:\s*4px;[\s\S]*\}/);
+    assert.strictEqual(6 + 16 + 4 + 32 + 6 + 2, 66);
   });
 
   it("会话行遗留的 CSS 与渲染逻辑全面清场", () => {
@@ -254,23 +221,9 @@ describe("快捷面板整卡（视觉外壳）", () => {
     const classes = [
       "quick-card",
       "quick-status-row",
-      "quick-level-btn",
-      "quick-level-label",
-      "quick-level-caret",
-      "quick-menu",
-      "quick-menu-modes",
-      "quick-mode-option",
-      "quick-mode-name",
-      "quick-mode-desc",
-      "quick-menu-effort",
-      "quick-effort-head",
-      "quick-effort-label",
-      "quick-effort-value",
-      "quick-effort-range",
+      "quick-status-text",
       "quick-input-row",
-      "quick-stop-btn",
-      "quick-folder-btn",
-      "quick-folder-label",
+      "quick-input",
     ];
     for (const cls of classes) {
       assert.match(sessionHudHtml, new RegExp(`\\.${cls}\\b`), `html 缺少 .${cls}`);
@@ -281,29 +234,13 @@ describe("快捷面板整卡（视觉外壳）", () => {
     assert.doesNotMatch(sessionHudHtml, /block-input|block-settings/);
   });
 
-  it("鼠标点击不出现系统焦点环，键盘导航用自定义蓝圈", () => {
-    // :focus 一律 outline:none（去掉 macOS 那圈黄边）
-    const focusRule = sessionHudHtml.match(/\.quick-level-btn:focus,[\s\S]*?\}/);
-    assert.ok(focusRule, "缺少 :focus outline 清理规则");
-    assert.match(focusRule[0], /outline:\s*none;/);
-    for (const cls of ["quick-level-btn", "quick-mode-option", "quick-folder-btn", "quick-stop-btn", "quick-effort-range"]) {
-      assert.ok(focusRule[0].includes(`.${cls}:focus`), `:focus 清理漏了 .${cls}`);
-    }
-    // :focus-visible（键盘 Tab）保留可见焦点，但用我们的蓝色，不用系统色
-    const visibleRule = sessionHudHtml.match(/\.quick-level-btn:focus-visible,[\s\S]*?\}/);
-    assert.ok(visibleRule, "缺少 :focus-visible 规则");
-    assert.match(visibleRule[0], /outline:\s*2px solid rgba\(59, 130, 246, 0\.6\);/);
-    // 两条规则中 :focus-visible 必须在后（同特异性下后者生效）
-    assert.ok(
-      sessionHudHtml.indexOf(".quick-level-btn:focus-visible") > sessionHudHtml.indexOf(".quick-level-btn:focus,"),
-      ":focus-visible 规则必须排在 :focus 之后"
-    );
+  it("输入框不出现系统焦点环，用自定义蓝色边框", () => {
+    // 输入框自己 outline:none（去掉 macOS 那圈黄边），聚焦时用蓝色边框示意
+    assert.match(sessionHudHtml, /\.quick-input \{[\s\S]*outline:\s*none;[\s\S]*\}/);
+    assert.match(sessionHudHtml, /\.quick-input:focus \{[\s\S]*border-color:\s*rgba\(59, 130, 246, 0\.55\);/);
+    assert.doesNotMatch(sessionHudHtml, /quick-level-btn|quick-stop-btn|quick-effort-range/);
   });
 
-  it("停止按钮的深色模式与 hover 态有自己的规则", () => {
-    assert.match(sessionHudHtml, /\.quick-stop-btn:hover \{/);
-    assert.match(sessionHudHtml, /@media \(prefers-color-scheme: dark\) \{[\s\S]*\.quick-stop-btn[\s\S]*\}/);
-  });
 });
 
 // The exporter gives a plain mark 56 of its 64px canvas but a contrast-tile
@@ -389,11 +326,9 @@ describe("Kimi quota freshness policy mirrors across browser renderers", () => {
 describe("面板窗口尺寸：主进程常量与 CSS 一致", () => {
   const hudTest = require("../src/session-hud").__test;
 
-  it("卡片常量与 HTML 的高度声明一一对应（收起 / 展开）", () => {
-    assert.deepStrictEqual(hudTest.QUICK_CARD, { width: 300, height: 134 });
-    assert.deepStrictEqual(hudTest.QUICK_CARD_EXPANDED, { width: 300, height: 316 });
-    assert.match(sessionHudHtml, /\.quick-card \{ height: 134px; \}/);
-    assert.match(sessionHudHtml, /body\.menu-open \.quick-card \{ height: 316px; \}/);
+  it("卡片常量与 HTML 的高度声明一一对应", () => {
+    assert.deepStrictEqual(hudTest.QUICK_CARD, { width: 300, height: 66 });
+    assert.match(sessionHudHtml, /\.quick-card \{ height: 66px; \}/);
   });
 
   it("窗口壳：底 30（输入法净空），与 body padding 一致", () => {
@@ -404,15 +339,24 @@ describe("面板窗口尺寸：主进程常量与 CSS 一致", () => {
     assert.match(sessionHudHtml, /body \{[\s\S]*?padding:\s*2px 3px 60px;[\s\S]*?\}/);
   });
 
-  it("卡片高度的算式成立（收起 134 / 展开 316）", () => {
-    // padding 6+6 + 状态 16 + 间隙 4 + 等级按钮 28 + 间隙 4 + 菜单(收起 0)
-    // + 间隙 4 + 文件夹 28 + 间隙 4 + 输入 32 + 边框 2 = 134
-    assert.strictEqual(6 + 16 + 4 + 28 + 4 + 0 + 4 + 28 + 4 + 32 + 6 + 2, hudTest.QUICK_CARD.height);
-    // 展开 = 收起 + 菜单 182
+  it("卡片高度的算式成立（状态行 + 输入行）", () => {
+    // padding 6+6 + 状态 16 + 间隙 4 + 输入 32 + 边框 2 = 66
+    assert.strictEqual(6 + 16 + 4 + 32 + 6 + 2, hudTest.QUICK_CARD.height);
+  });
+
+  it("展开态：列表区行数与卡片高度两侧一致", () => {
+    assert.deepStrictEqual(hudTest.QUICK_CARD_EXPANDED, { width: 300, height: 320 });
+    assert.match(sessionHudHtml, /body\.session-list-open \.quick-card \{ height: 320px; \}/);
+    assert.match(sessionHudHtml, /body\.session-list-open \.quick-session-list \{ height: 250px; \}/);
+    assert.match(sessionHudHtml, /\.quick-session-item \{[\s\S]*?height: 28px;[\s\S]*?\}/);
+    assert.match(sessionHudHtml, /\.quick-setting-row \{[\s\S]*?height: 34px;[\s\S]*?\}/);
+    // 列表区：最多 4 条会话（4×28）+ 新建入口（28）+ 权限开关（34）+ 强度开关（34）
+    // + 选文件夹入口（28）+ 行距 7×2 = 250，再加一个卡片行距 4 = 320。
     assert.strictEqual(
-      hudTest.QUICK_CARD.height + 182,
-      hudTest.QUICK_CARD_EXPANDED.height
+      4 * 28 + 28 + 34 + 34 + 28 + 7 * 2 + 4,
+      hudTest.QUICK_CARD_EXPANDED.height - hudTest.QUICK_CARD.height
     );
+    assert.strictEqual(hudTest.QUICK_CARD.height + 250 + 4, hudTest.QUICK_CARD_EXPANDED.height);
   });
 
   it("卡片下方 30px 壳内不放任何节点（输入法净空）", () => {

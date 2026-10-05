@@ -221,60 +221,82 @@ function translations() {
 function hudTranslations(overrides = {}) {
   return {
     hudQuickPlaceholder: "Type a message, Enter to send…",
+    hudQuickSendingTo: "Sending to: {name}",
     hudQuickStatusIdle: "Idle",
     hudQuickStatusWorking: "Working",
-    hudQuickStatusError: "Error",
-    hudQuickQueued: "{n} queued",
-    hudQuickNoCwd: "Pick a working folder first",
-    hudQuickPickFolder: "Pick folder…",
-    hudQuickStop: "Stop",
     hudQuickSendFailed: "Send failed",
-    hudQuickQueueFull: "Queue full",
-    chatEffortLabel: "Effort",
-    chatModeLabel: "Permission mode",
-    chatEffortLow: "Low",
-    chatEffortMedium: "Medium",
-    chatEffortHigh: "High",
-    chatEffortXhigh: "Very high",
-    chatEffortMax: "Max",
-    chatModeDefault: "Manual",
-    chatModeAcceptEdits: "Auto-edit",
-    chatModePlan: "Plan",
-    chatModeAuto: "Auto",
-    chatModeDefaultDesc: "Asks before risky operations do",
-    chatModeAcceptEditsDesc: "File edits go through, the rest still asks",
-    chatModePlanDesc: "Plans only — runs nothing",
-    chatModeAutoDesc: "A model classifier approves actions",
+    hudSendSent: "Sent to the terminal",
+    hudSendCopied: "Copied — paste it in the terminal",
+    hudSendNeedsPermission: "Copied — click Allow in the system dialog",
+    hudSendNoSession: "No session running",
+    hudQuickTargetLabel: "Choose which session to send to",
+    hudQuickNewSession: "＋ New session in the terminal",
+    hudQuickNewSessionAt: "Folder: {path}",
+    hudQuickPickFolder: "📁 Choose a folder…",
+    hudPickFolderFailed: "Could not open the folder picker",
+    hudQuickPermissionLabel: "Permissions",
+    hudQuickEffortLabel: "Effort",
+    hudNewSessionQueued: "Queued — the terminal opens with your first message",
+    hudNewSessionStarted: "New session opened in the terminal, message sent",
+    hudNewSessionStarting: "The new session is still starting",
+    hudQuickPendingTitle: "New session",
+    hudQuickPendingHint: "Opens in the terminal with your first message",
+    hudQuickPendingState: "not started",
+    hudQuickPendingStarting: "starting up",
+    hudQuickCancelPending: "Cancel this new session",
+    hudQuickPermissionAuto: "Auto",
+    hudQuickPermissionManual: "Manual",
+    hudQuickPermissionEdits: "Edits",
+    hudQuickPermissionPlan: "Plan",
+    hudQuickEffortLow: "Low",
+    hudQuickEffortMedium: "Med",
+    hudQuickEffortHigh: "High",
+    hudQuickEffortXHigh: "XHigh",
+    hudQuickEffortMax: "Max",
+    hudQuickOptionFailed: "Could not switch that setting",
+    hudNewSessionOpened: "Opened a new session in the terminal",
+    hudNewSessionFailed: "Could not open a new session",
     ...overrides,
   };
 }
 
 const HUD_ZH_TRANSLATIONS = hudTranslations({
   hudQuickPlaceholder: "输入消息，回车发送…",
+  hudQuickSendingTo: "正在发给：{name}",
   hudQuickStatusIdle: "空闲",
   hudQuickStatusWorking: "工作中",
-  hudQuickStatusError: "出错",
-  hudQuickQueued: "已排队 {n}",
-  hudQuickNoCwd: "先选择工作文件夹",
-  hudQuickPickFolder: "选文件夹…",
-  hudQuickStop: "停止",
   hudQuickSendFailed: "发送失败",
-  hudQuickQueueFull: "队列已满",
-  chatEffortLabel: "强度",
-  chatModeLabel: "权限模式",
-  chatEffortLow: "低",
-  chatEffortMedium: "中",
-  chatEffortHigh: "高",
-  chatEffortXhigh: "很高",
-  chatEffortMax: "最大",
-  chatModeDefault: "手动",
-  chatModeAcceptEdits: "自动编辑",
-  chatModePlan: "计划",
-  chatModeAuto: "自动",
-  chatModeDefaultDesc: "危险操作前会先询问你",
-  chatModeAcceptEditsDesc: "文件修改自动放行，其余仍会询问",
-  chatModePlanDesc: "只做方案，不执行任何操作",
-  chatModeAutoDesc: "由模型自动判断并放行",
+  hudSendSent: "已发送到终端",
+  hudSendCopied: "已复制，去终端粘贴",
+  hudSendNeedsPermission: "已复制；要直接发送请在系统弹窗里点“允许”",
+  hudSendNoSession: "没有正在运行的会话",
+  hudQuickTargetLabel: "选择发给哪个会话",
+  hudQuickNewSession: "＋ 在终端里新建会话",
+  hudQuickNewSessionAt: "位置：{path}",
+  hudQuickPickFolder: "📁 选择文件夹…",
+  hudPickFolderFailed: "没能打开文件夹选择框",
+  hudQuickPermissionLabel: "权限",
+  hudQuickEffortLabel: "强度",
+  hudNewSessionQueued: "已排好，发消息时会在终端里打开",
+  hudNewSessionStarted: "新会话已在终端里开好，消息已送出",
+  hudNewSessionStarting: "新会话正在启动，稍等一下再发",
+  hudQuickPendingTitle: "新会话",
+  hudQuickPendingHint: "发第一句话时才在终端里打开",
+  hudQuickPendingState: "还没开始",
+  hudQuickPendingStarting: "正在启动",
+  hudQuickCancelPending: "取消这个新会话",
+  hudQuickPermissionAuto: "自动",
+  hudQuickPermissionManual: "手动",
+  hudQuickPermissionEdits: "自动编辑",
+  hudQuickPermissionPlan: "计划",
+  hudQuickEffortLow: "低",
+  hudQuickEffortMedium: "中",
+  hudQuickEffortHigh: "高",
+  hudQuickEffortXHigh: "极高",
+  hudQuickEffortMax: "最大",
+  hudQuickOptionFailed: "切换失败",
+  hudNewSessionOpened: "已在终端里新建会话",
+  hudNewSessionFailed: "新建会话失败",
 });
 
 function session(id, overrides = {}) {
@@ -383,13 +405,14 @@ async function loadHud(options = {}) {
   const document = createDocument(["hud"]);
   const calls = {
     sendPrompt: [],
-    setEffort: [],
-    setPermissionMode: [],
-    setMenuOpen: [],
     setClickThrough: [],
-    pickWorkingDir: 0,
-    stopChat: 0,
     setHold: [],
+    selectSession: [],
+    setListOpen: [],
+    newSession: 0,
+    pickFolder: 0,
+    setNewSessionOption: [],
+    cancelPendingSession: 0,
   };
   const warnings = [];
   const timers = new Map();
@@ -409,39 +432,38 @@ async function loadHud(options = {}) {
         ? options.sendPromptResult(text)
         : (options.sendPromptResult || { status: "ok" });
     },
-    setEffort: async (value) => {
-      calls.setEffort.push(value);
-      if (options.setEffortThrows) throw new Error("set effort failed");
-      return typeof options.setEffortResult === "function"
-        ? options.setEffortResult(value)
-        : (options.setEffortResult || { status: "ok" });
-    },
-    setPermissionMode: async (value) => {
-      calls.setPermissionMode.push(value);
-      if (options.setPermissionModeThrows) throw new Error("set permission mode failed");
-      return typeof options.setPermissionModeResult === "function"
-        ? options.setPermissionModeResult(value)
-        : (options.setPermissionModeResult || { status: "ok" });
-    },
-    setMenuOpen: async (open) => {
-      calls.setMenuOpen.push(open);
-      if (options.setMenuOpenThrows) throw new Error("set menu open failed");
-      return options.setMenuOpenResult || { status: "ok" };
-    },
     // 与 preload 一致：同步 send，不返回 Promise。
     setClickThrough: (through) => {
       calls.setClickThrough.push(through);
       if (options.setClickThroughThrows) throw new Error("set click through failed");
     },
-    pickWorkingDir: async () => {
-      calls.pickWorkingDir += 1;
-      return options.pickWorkingDirResult || { status: "canceled" };
-    },
-    stopChat: async () => {
-      calls.stopChat += 1;
-      return { status: "ok" };
-    },
     setHold: (reason, held) => { calls.setHold.push([reason, held]); },
+    selectSession: async (sessionId) => {
+      calls.selectSession.push(sessionId);
+      return options.selectSessionResult || { status: "ok" };
+    },
+    setListOpen: async (open) => {
+      calls.setListOpen.push(!!open);
+      return options.setListOpenResult || { status: "ok" };
+    },
+    newSession: async () => {
+      calls.newSession += 1;
+      return options.newSessionResult || { status: "ok", textKey: "hudNewSessionOpened" };
+    },
+    pickFolder: async () => {
+      calls.pickFolder += 1;
+      if (options.pickFolderThrows) throw new Error("pick folder failed");
+      return options.pickFolderResult || { status: "ok" };
+    },
+    cancelPendingSession: async () => {
+      calls.cancelPendingSession += 1;
+      return options.cancelPendingResult || { status: "ok" };
+    },
+    setNewSessionOption: async (key, value) => {
+      calls.setNewSessionOption.push([key, value]);
+      if (options.setOptionThrows) throw new Error("set option failed");
+      return options.setOptionResult || { status: "ok" };
+    },
   };
 
   const context = vm.createContext({
@@ -865,390 +887,537 @@ test("Dashboard keeps session automation failure feedback visible after rerender
   );
 });
 
-/* ===== 快捷面板：单窗口整卡结构 ===== */
+/* ===== 快捷面板：状态行（正在发给谁）+ 输入行 ===== */
 
-test("quick panel: idle default shows Idle, hides the stop button and has no selects", async () => {
+const PANEL_ZH = "zh";
+
+function withTarget(hud, { title = "clawd-on-desk", state = "working", folder = "clawd-on-desk" } = {}) {
+  hud.pushQuickState({ targetTitle: title, targetFolder: folder, targetState: state, canSend: true });
+}
+
+test("quick panel: 只有状态行与输入框两行，没有下拉/菜单/停止按钮", async () => {
   const hud = await loadHud();
-  assert.strictEqual(hud.one("quick-status-text").textContent, "Idle");
-  assert.strictEqual(hud.one("quick-status-text").classList.contains("is-error"), false);
-  assert.strictEqual(hud.one("quick-input").placeholder, "Type a message, Enter to send…");
-  assert.strictEqual(hud.one("quick-stop-btn").style.display, "none");
-  assert.strictEqual(hud.one("quick-stop-btn").getAttribute("aria-label"), "Stop");
-  assert.strictEqual(hud.find("quick-card").length, 1, "one card holds the whole panel");
-  assert.strictEqual(hud.byTag("select").length, 0, "the old two-select layout is gone");
+  assert.strictEqual(hud.find("quick-card").length, 1);
+  assert.strictEqual(hud.find("quick-status-row").length, 1);
+  assert.strictEqual(hud.find("quick-input-row").length, 1);
+  for (const gone of [
+    "quick-level-btn", "quick-menu", "quick-mode-option", "quick-effort-range",
+    "quick-folder-btn", "quick-stop-btn",
+  ]) {
+    assert.strictEqual(hud.one(gone), null, `${gone} 应随内置客户端一起删掉`);
+  }
+  assert.strictEqual(hud.byTag("select").length, 0);
 });
 
-test("quick panel: builds status / level / menu / folder / input rows in order", async () => {
+test("quick panel: 没有会话时说「没有正在运行的会话」", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  assert.strictEqual(hud.one("quick-status-text").textContent, "没有正在运行的会话");
+  assert.strictEqual(hud.one("quick-input").placeholder, "输入消息，回车发送…");
+});
+
+test("quick panel: 状态行显示目标会话名与它的状态", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  withTarget(hud);
+  assert.strictEqual(hud.one("quick-status-text").textContent, "正在发给：clawd-on-desk · 工作中");
+
+  hud.pushQuickState({ targetTitle: "clawd-on-desk", targetState: "idle", canSend: true });
+  assert.strictEqual(hud.one("quick-status-text").textContent, "正在发给：clawd-on-desk · 空闲");
+
+  // 目标会话切走了 → 回到「没有会话」
+  hud.pushQuickState({ canSend: false });
+  assert.strictEqual(hud.one("quick-status-text").textContent, "没有正在运行的会话");
+});
+
+test("quick panel: Enter 发送，送进终端后清空输入框并提示", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  withTarget(hud);
+  const input = hud.one("quick-input");
+  input.value = "帮我看看这个 bug";
+  await input.dispatch("keydown", { key: "Enter", keyCode: 13, isComposing: false });
+  await flush();
+
+  assert.deepStrictEqual(hud.calls.sendPrompt, ["帮我看看这个 bug"]);
+  assert.strictEqual(input.value, "", "真的送进去了才清空");
+  assert.strictEqual(hud.one("quick-status-text").textContent, "已发送到终端");
+  assert.deepStrictEqual(hud.calls.setHold, [["draft", false]]);
+  // 4 秒后提示消失，状态行回到「正在发给谁」
+  hud.fireTimers();
+  assert.strictEqual(hud.one("quick-status-text").textContent, "正在发给：clawd-on-desk · 工作中");
+});
+
+test("quick panel: 只复制到剪贴板时保留文字，并如实说「去粘贴」", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    sendPromptResult: { status: "copied", textKey: "hudSendCopied" },
+  });
+  withTarget(hud);
+  const input = hud.one("quick-input");
+  input.value = "你好";
+  await input.dispatch("keydown", { key: "Enter", keyCode: 13, isComposing: false });
+  await flush();
+
+  assert.strictEqual(input.value, "你好", "没真送进去，文字要留着");
+  assert.strictEqual(hud.one("quick-status-text").textContent, "已复制，去终端粘贴");
+  assert.ok(hud.one("quick-status-text").classList.contains("is-error"));
+});
+
+test("quick panel: 没会话/失败都如实提示，不谎报已发送", async () => {
+  const noSession = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    sendPromptResult: { status: "no-session", textKey: "hudSendNoSession" },
+  });
+  noSession.pushQuickState({ canSend: true, targetTitle: "x" });
+  const inputA = noSession.one("quick-input");
+  inputA.value = "在吗";
+  await inputA.dispatch("keydown", { key: "Enter", keyCode: 13, isComposing: false });
+  await flush();
+  assert.strictEqual(noSession.one("quick-status-text").textContent, "没有正在运行的会话");
+  assert.strictEqual(inputA.value, "在吗");
+
+  const failed = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    sendPromptResult: { status: "error", textKey: "hudQuickSendFailed" },
+  });
+  failed.pushQuickState({ canSend: true, targetTitle: "x" });
+  const inputB = failed.one("quick-input");
+  inputB.value = "在吗";
+  await inputB.dispatch("keydown", { key: "Enter", keyCode: 13, isComposing: false });
+  await flush();
+  assert.strictEqual(failed.one("quick-status-text").textContent, "发送失败");
+  assert.strictEqual(inputB.value, "在吗");
+});
+
+test("quick panel: 抛错也走失败提示", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    sendPromptThrows: true,
+  });
+  hud.pushQuickState({ canSend: true, targetTitle: "x" });
+  const input = hud.one("quick-input");
+  input.value = "在吗";
+  await input.dispatch("keydown", { key: "Enter", keyCode: 13, isComposing: false });
+  await flush();
+  assert.strictEqual(hud.one("quick-status-text").textContent, "发送失败");
+  assert.strictEqual(input.value, "在吗");
+});
+
+test("quick panel: IME 组字中的回车不发送", async () => {
   const hud = await loadHud();
-  const card = hud.one("quick-card");
-  assert.deepStrictEqual(card.children.map((child) => child.className), [
-    "quick-status-row",
-    "quick-level-btn",
-    "quick-menu",
-    "quick-folder-btn",
-    "quick-input-row",
+  withTarget(hud);
+  const input = hud.one("quick-input");
+  input.value = "在";
+  await input.dispatch("keydown", { key: "Enter", keyCode: 229, isComposing: true });
+  await flush();
+  assert.deepStrictEqual(hud.calls.sendPrompt, []);
+});
+
+test("quick panel: 空白草稿不发送", async () => {
+  const hud = await loadHud();
+  withTarget(hud);
+  const input = hud.one("quick-input");
+  input.value = "   ";
+  await input.dispatch("keydown", { key: "Enter", keyCode: 13, isComposing: false });
+  await flush();
+  assert.deepStrictEqual(hud.calls.sendPrompt, []);
+});
+
+test("quick panel: 聚焦与草稿分别上报 hold", async () => {
+  const hud = await loadHud();
+  const input = hud.one("quick-input");
+  assert.deepStrictEqual(hud.calls.setHold, []);
+  await input.dispatch("focus");
+  input.value = "草稿";
+  await input.dispatch("input");
+  input.value = "";
+  await input.dispatch("input");
+  await input.dispatch("blur");
+  assert.deepStrictEqual(hud.calls.setHold, [["focus", true], ["draft", true], ["draft", false], ["focus", false]]);
+});
+
+test("quick panel: 语言切换只改文案，不重建输入框", async () => {
+  const hud = await loadHud();
+  withTarget(hud);
+  const input = hud.one("quick-input");
+  input.value = "draft text";
+  hud.pushLang({ lang: "zh", translations: HUD_ZH_TRANSLATIONS });
+
+  assert.strictEqual(hud.one("quick-input"), input, "输入框节点要复用");
+  assert.strictEqual(input.value, "draft text", "草稿不能在切语言时丢");
+  assert.strictEqual(input.placeholder, "输入消息，回车发送…");
+  assert.strictEqual(hud.one("quick-status-text").textContent, "正在发给：clawd-on-desk · 工作中");
+});
+
+test("quick panel: 点状态行开合会话列表", async () => {
+  const hud = await loadHud();
+  withTarget(hud);
+  const button = hud.one("quick-target-btn");
+  assert.ok(button, "状态行要是一个可点的按钮");
+  assert.strictEqual(button.getAttribute("aria-expanded"), "false");
+
+  await button.dispatch("click");
+  await flush();
+  assert.deepStrictEqual(hud.calls.setListOpen, [true]);
+
+  hud.pushQuickState({
+    canSend: true, targetTitle: "x", listOpen: true,
+    sessions: [{ id: "s1", title: "x", folder: "proj", state: "working", active: true }],
+  });
+  assert.strictEqual(button.getAttribute("aria-expanded"), "true");
+  assert.strictEqual(hud.find("quick-session-item").length, 1, "展开后才建列表行");
+});
+
+test("quick panel: 列表按会话渲染，当前目标高亮，新建入口在最后", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    canSend: true,
+    targetId: "s2",
+    targetTitle: "第二个",
+    listOpen: true,
+    canCreateSession: true,
+    newSessionFolder: "~/Documents/谱子",
+    newSessionFolderName: "谱子",
+    sessions: [
+      { id: "s1", title: "第一个", folder: "proj-a", state: "idle", active: false },
+      { id: "s2", title: "第二个", folder: "proj-b", state: "working", active: true },
+    ],
+  });
+  const items = hud.find("quick-session-item");
+  assert.strictEqual(items.length, 4, "两条会话 + 新建入口 + 选文件夹入口");
+  assert.strictEqual(byClass(items[0], "quick-session-name")[0].textContent, "第一个");
+  assert.strictEqual(byClass(items[0], "quick-session-meta")[0].textContent, "proj-a · 空闲");
+  assert.ok(items[1].classList.contains("is-active"), "当前目标要高亮");
+  assert.strictEqual(byClass(items[2], "quick-session-name")[0].textContent, "＋ 在终端里新建会话");
+  // 列表收起时清空 DOM，不留看不见的节点
+  hud.pushQuickState({ canSend: true, targetTitle: "x", listOpen: false });
+  assert.strictEqual(hud.find("quick-session-item").length, 0);
+});
+
+test("quick panel: 只有支持新建会话的平台才画新建与选文件夹那两行", async () => {
+  const hud = await loadHud();
+  hud.pushQuickState({ listOpen: true, canCreateSession: false, sessions: [] });
+  assert.strictEqual(hud.find("quick-session-create").length, 0);
+  assert.strictEqual(hud.find("quick-session-folder").length, 0);
+});
+
+test("quick panel: 排好的新会话占列表第一行，并挤掉一条会话行", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    listOpen: true,
+    canCreateSession: true,
+    pendingId: "pending:1",
+    targetPending: true,
+    sessions: [1, 2, 3, 4].map((n) => ({ id: `s${n}`, title: `S${n}`, state: "idle", active: false })),
+  });
+
+  const pending = hud.one("quick-session-pending");
+  assert.ok(pending, "要有占位行");
+  assert.strictEqual(byClass(pending, "quick-session-name")[0].textContent, "新会话");
+  assert.strictEqual(
+    byClass(pending, "quick-session-meta")[0].textContent,
+    "发第一句话时才在终端里打开"
+  );
+  assert.ok(pending.classList.contains("is-active"), "目标是它时要高亮");
+
+  // 占位占一行，所以真会话只画 3 条——列表区高度是写死的
+  const sessions = hud.find("quick-session-item").filter((row) => row.getAttribute("data-session-id"));
+  assert.strictEqual(sessions.length, 3, "4 条会话被占位挤掉一条");
+  assert.deepStrictEqual(
+    sessions.map((row) => row.getAttribute("data-session-id")),
+    ["s1", "s2", "s3"]
+  );
+  assert.strictEqual(
+    hud.one("quick-session-list").children[0].className,
+    "quick-pending-row",
+    "占位在最上面"
+  );
+});
+
+test("quick panel: 目标是不成信儿的占位时，状态行说明它在等第一句话", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    listOpen: true, canCreateSession: true, canSend: true, pendingId: "pending:1", targetPending: true,
+  });
+  assert.strictEqual(hud.one("quick-status-text").textContent, "正在发给：新会话 · 还没开始");
+
+  hud.pushQuickState({
+    listOpen: true, canCreateSession: true, canSend: true, pendingId: "pending:1",
+    targetPending: true, pendingLaunched: true,
+  });
+  assert.strictEqual(hud.one("quick-status-text").textContent, "正在发给：新会话 · 正在启动");
+});
+
+test("quick panel: 点占位行 = 选中它并收起列表", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({ listOpen: true, canCreateSession: true, pendingId: "pending:7", targetPending: false });
+  await hud.one("quick-session-pending").dispatch("click");
+  await flush();
+  assert.deepStrictEqual(hud.calls.selectSession, ["pending:7"]);
+  assert.deepStrictEqual(hud.calls.setListOpen, [false]);
+});
+
+test("quick panel: 点 ✕ 取消排好的新会话", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({ listOpen: true, canCreateSession: true, pendingId: "pending:7", targetPending: true });
+  const cancel = hud.one("quick-pending-cancel");
+  assert.strictEqual(cancel.getAttribute("aria-label"), "取消这个新会话");
+  await cancel.dispatch("click");
+  await flush();
+  assert.strictEqual(hud.calls.cancelPendingSession, 1);
+  assert.deepStrictEqual(hud.calls.selectSession, [], "取消不是选中");
+});
+
+test("quick panel: 没有占位时不画那一行", async () => {
+  const hud = await loadHud();
+  hud.pushQuickState({ listOpen: true, canCreateSession: true, sessions: [] });
+  assert.strictEqual(hud.find("quick-pending-row").length, 0);
+});
+
+test("quick panel: 会话行最多 4 条，列表区行数固定", async () => {
+  const hud = await loadHud();
+  hud.pushQuickState({
+    listOpen: true,
+    canCreateSession: true,
+    sessions: [1, 2, 3, 4, 5].map((n) => ({
+      id: `s${n}`, title: `S${n}`, folder: `p${n}`, state: "idle", active: false,
+    })),
+  });
+  const items = hud.find("quick-session-item");
+  // 4 条会话 + 新建入口 + 选文件夹入口 = 6 行，正好是列表区的固定行数。
+  assert.strictEqual(items.length, 6);
+  assert.strictEqual(byClass(items[3], "quick-session-name")[0].textContent, "S4");
+  assert.strictEqual(byClass(items[4], "quick-session-name")[0].textContent, "＋ New session in the terminal");
+  assert.strictEqual(byClass(items[5], "quick-session-name")[0].textContent, "📁 Choose a folder…");
+});
+
+test("quick panel: 新建会话那一行与选文件夹那一行都写明当前目录", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    listOpen: true, canCreateSession: true, sessions: [],
+    newSessionFolder: "~/Documents/谱子", newSessionFolderName: "谱子",
+  });
+  assert.strictEqual(
+    byClass(hud.one("quick-session-create"), "quick-session-meta")[0].textContent,
+    "位置：谱子",
+    "点之前就要看得出新会话开在哪儿"
+  );
+  const folderRow = hud.one("quick-session-folder");
+  assert.strictEqual(byClass(folderRow, "quick-session-name")[0].textContent, "📁 选择文件夹…");
+  assert.strictEqual(byClass(folderRow, "quick-session-meta")[0].textContent, "~/Documents/谱子");
+
+  // 主进程还没给目录时，那一行只画标题，不画空的小字
+  hud.pushQuickState({ listOpen: true, canCreateSession: true, sessions: [] });
+  assert.strictEqual(byClass(hud.one("quick-session-create"), "quick-session-meta").length, 0);
+  assert.strictEqual(byClass(hud.one("quick-session-folder"), "quick-session-meta").length, 0);
+});
+
+test("quick panel: 权限与强度两排按钮按当前档高亮", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    listOpen: true,
+    canCreateSession: true,
+    sessions: [],
+    permissionMode: "acceptEdits",
+    effort: "xhigh",
+  });
+
+  const rows = hud.find("quick-setting-row");
+  assert.strictEqual(rows.length, 2, "权限一排、强度一排");
+  const chipsText = (row) => byClass(row, "quick-chip").map((chip) => chip.textContent);
+  assert.deepStrictEqual(chipsText(rows[0]), ["自动", "手动", "自动编辑", "计划"]);
+  assert.deepStrictEqual(chipsText(rows[1]), ["低", "中", "高", "极高", "最大"]);
+  assert.strictEqual(byClass(rows[0], "quick-setting-label")[0].textContent, "权限");
+  assert.strictEqual(byClass(rows[1], "quick-setting-label")[0].textContent, "强度");
+
+  const selected = (row) => byClass(row, "quick-chip")
+    .filter((chip) => chip.classList.contains("is-selected"))
+    .map((chip) => chip.textContent);
+  assert.deepStrictEqual(selected(rows[0]), ["自动编辑"]);
+  assert.deepStrictEqual(selected(rows[1]), ["极高"]);
+});
+
+test("quick panel: 点权限/强度按钮 → 把键和值交给主进程", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({ listOpen: true, canCreateSession: true, sessions: [] });
+  const rows = hud.find("quick-setting-row");
+
+  await byClass(rows[0], "quick-chip")[3].dispatch("click"); // 计划
+  await byClass(rows[1], "quick-chip")[4].dispatch("click"); // 最大
+  await flush();
+
+  assert.deepStrictEqual(hud.calls.setNewSessionOption, [
+    ["permissionMode", "plan"],
+    ["effort", "max"],
   ]);
-  assert.strictEqual(hud.find("quick-level-label").length, 1);
-  assert.strictEqual(hud.find("quick-level-caret").length, 1);
-  assert.strictEqual(hud.one("quick-folder-label").textContent, "Pick folder…");
 });
 
-test("quick panel: the menu lists four modes with names and descriptions plus the effort slider", async () => {
-  const hud = await loadHud();
-  const options = hud.find("quick-mode-option");
-  assert.strictEqual(options.length, 4);
-  assert.deepStrictEqual(
-    options.map((el) => byClass(el, "quick-mode-name")[0].textContent),
-    ["Manual", "Auto-edit", "Plan", "Auto"]
+test("quick panel: 两排开关排在新建会话下面、选文件夹上面", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    listOpen: true, canCreateSession: true, sessions: [],
+    newSessionFolder: "~", newSessionFolderName: "~",
+  });
+  const order = [...hud.one("quick-session-list").children].map((node) => node.className);
+  assert.deepStrictEqual(order, [
+    "quick-session-item quick-session-create",
+    "quick-setting-row",
+    "quick-setting-row",
+    "quick-session-item quick-session-folder",
+  ]);
+});
+
+test("quick panel: 新建会话那一行把当前两个开关也写出来", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    listOpen: true, canCreateSession: true, sessions: [],
+    newSessionFolderName: "谱子", permissionMode: "plan", effort: "high",
+  });
+  assert.strictEqual(
+    byClass(hud.one("quick-session-create"), "quick-session-meta")[0].textContent,
+    "位置：谱子 · 计划 · 强度：高"
   );
-  assert.deepStrictEqual(
-    options.map((el) => byClass(el, "quick-mode-desc")[0].textContent),
-    [
-      "Asks before risky operations do",
-      "File edits go through, the rest still asks",
-      "Plans only — runs nothing",
-      "A model classifier approves actions",
-    ]
+
+  hud.pushQuickState({
+    listOpen: true, canCreateSession: true, sessions: [],
+    newSessionFolderName: "谱子", permissionMode: "default", effort: "default",
+  });
+  assert.strictEqual(
+    byClass(hud.one("quick-session-create"), "quick-session-meta")[0].textContent,
+    "位置：谱子",
+    "默认档不提，省得那行太长"
   );
-  const range = hud.one("quick-effort-range");
-  assert.strictEqual(range.type, "range");
-  assert.strictEqual(range.min, "0");
-  assert.strictEqual(range.max, "4");
-  assert.strictEqual(range.step, "1");
-  assert.strictEqual(range.value, "1", "medium is the default effort");
-  assert.strictEqual(hud.one("quick-effort-label").textContent, "Effort");
-  assert.strictEqual(hud.one("quick-effort-value").textContent, "Medium");
-  assert.strictEqual(range.getAttribute("aria-label"), "Effort");
 });
 
-test("quick panel: menuOpen follows the pushed state on the body class", async () => {
-  const hud = await loadHud();
-  assert.strictEqual(hud.document.body.classList.contains("menu-open"), false);
-  hud.pushQuickState({ menuOpen: true });
-  assert.strictEqual(hud.document.body.classList.contains("menu-open"), true);
-  hud.pushQuickState({ menuOpen: false });
-  assert.strictEqual(hud.document.body.classList.contains("menu-open"), false);
-});
-
-test("quick panel: the level button reads mode · effort and toggles the menu", async () => {
-  const hud = await loadHud();
-  hud.pushQuickState({ permissionMode: "auto", effort: "high" });
-  const button = hud.one("quick-level-btn");
-  assert.strictEqual(hud.one("quick-level-label").textContent, "Auto · High");
-  assert.strictEqual(button.getAttribute("aria-label"), "Permission mode · Effort");
-  assert.strictEqual(button.title, "Permission mode · Effort");
-
-  await button.dispatch("click");
-  assert.deepStrictEqual(hud.calls.setMenuOpen, [true]);
-  hud.pushQuickState({ menuOpen: true });
-  await button.dispatch("click");
-  assert.deepStrictEqual(hud.calls.setMenuOpen, [true, false]);
-});
-
-test("quick panel: the active mode follows state and picking a mode sends setPermissionMode", async () => {
-  const hud = await loadHud();
-  hud.pushQuickState({ permissionMode: "plan" });
-  const options = hud.find("quick-mode-option");
-  const active = () => options.filter((el) => el.classList.contains("is-active"));
-  assert.strictEqual(active().length, 1);
-  assert.strictEqual(byClass(active()[0], "quick-mode-name")[0].textContent, "Plan");
-
-  await options[3].dispatch("click");
-  assert.deepStrictEqual(hud.calls.setPermissionMode, ["auto"]);
-  // 点当前项不发请求，高亮也仍只由状态推送驱动
-  await options[2].dispatch("click");
-  assert.deepStrictEqual(hud.calls.setPermissionMode, ["auto"]);
-  assert.strictEqual(active().length, 1);
-  assert.strictEqual(byClass(active()[0], "quick-mode-name")[0].textContent, "Plan");
-});
-
-test("quick panel: a failed mode pick leaves the highlight untouched", async () => {
-  const hud = await loadHud({ setPermissionModeResult: { status: "error" } });
-  hud.pushQuickState({ permissionMode: "plan" });
-  const options = hud.find("quick-mode-option");
-  await options[3].dispatch("click");
+test("quick panel: 切开关失败时如实提示", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    setOptionThrows: true,
+  });
+  hud.pushQuickState({ listOpen: true, canCreateSession: true, sessions: [] });
+  await byClass(hud.find("quick-setting-row")[1], "quick-chip")[1].dispatch("click");
   await flush();
-  assert.deepStrictEqual(hud.calls.setPermissionMode, ["auto"]);
-  const active = options.filter((el) => el.classList.contains("is-active"));
-  assert.strictEqual(active.length, 1);
-  assert.strictEqual(byClass(active[0], "quick-mode-name")[0].textContent, "Plan");
-  assert.ok(hud.warnings.some(([level]) => level === "warn"));
+  assert.strictEqual(hud.one("quick-status-text").textContent, "切换失败");
+  assert.ok(hud.one("quick-status-text").classList.contains("is-error"));
 });
 
-test("quick panel: the slider follows effort and locks while busy or queued", async () => {
+test("quick panel: 点选文件夹 → 调主进程，列表保持展开", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({ listOpen: true, canCreateSession: true, sessions: [], newSessionFolder: "~" });
+  await hud.one("quick-session-folder").dispatch("click");
+  await flush();
+  assert.strictEqual(hud.calls.pickFolder, 1);
+  assert.deepStrictEqual(hud.calls.setListOpen, [], "选完不收起：用户接着要点新建会话");
+  assert.ok(!hud.one("quick-status-text").classList.contains("is-error"), "取消选择不该报错");
+});
+
+test("quick panel: 文件夹选择框打不开（含抛错）时如实提示", async () => {
+  const failed = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    pickFolderResult: { status: "error" },
+  });
+  failed.pushQuickState({ listOpen: true, canCreateSession: true, sessions: [] });
+  await failed.one("quick-session-folder").dispatch("click");
+  await flush();
+  assert.strictEqual(failed.one("quick-status-text").textContent, "没能打开文件夹选择框");
+  assert.ok(failed.one("quick-status-text").classList.contains("is-error"));
+
+  const threw = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    pickFolderThrows: true,
+  });
+  threw.pushQuickState({ listOpen: true, canCreateSession: true, sessions: [] });
+  await threw.one("quick-session-folder").dispatch("click");
+  await flush();
+  assert.strictEqual(threw.one("quick-status-text").textContent, "没能打开文件夹选择框");
+});
+
+test("quick panel: 点某条会话 → 选中它并收起列表", async () => {
   const hud = await loadHud();
-  const range = hud.one("quick-effort-range");
-  assert.strictEqual(range.value, "1");
-  hud.pushQuickState({ effort: "xhigh" });
-  assert.strictEqual(range.value, "3");
-  assert.strictEqual(hud.one("quick-effort-value").textContent, "Very high");
-
-  hud.pushQuickState({ busy: true });
-  assert.strictEqual(range.disabled, true);
-  hud.pushQuickState({ busy: false, queuedCount: 2 });
-  assert.strictEqual(range.disabled, true);
-  hud.pushQuickState({ busy: false, queuedCount: 0 });
-  assert.strictEqual(range.disabled, false);
+  hud.pushQuickState({
+    canSend: true, targetTitle: "x", listOpen: true,
+    sessions: [{ id: "s9", title: "目标", state: "working", active: true }],
+  });
+  await hud.find("quick-session-item")[0].dispatch("click");
+  await flush();
+  assert.deepStrictEqual(hud.calls.selectSession, ["s9"]);
+  assert.deepStrictEqual(hud.calls.setListOpen, [false]);
 });
 
-test("quick panel: sliding updates only the label, releasing commits setEffort", async () => {
-  const hud = await loadHud();
-  const range = hud.one("quick-effort-range");
-  range.value = "4";
-  await range.dispatch("input");
-  assert.deepStrictEqual(hud.calls.setEffort, [], "dragging never sends a request");
-  assert.strictEqual(hud.one("quick-effort-value").textContent, "Max");
-
-  await range.dispatch("change");
+test("quick panel: 点新建会话 → 只排一个位，不开终端、也不收列表", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    newSessionResult: { status: "ok", textKey: "hudNewSessionQueued" },
+  });
+  hud.pushQuickState({ listOpen: true, canCreateSession: true, sessions: [] });
+  await hud.find("quick-session-create")[0].dispatch("click");
   await flush();
-  assert.deepStrictEqual(hud.calls.setEffort, ["max"]);
-
-  // 生效值没变就不重复发
-  hud.pushQuickState({ effort: "max" });
-  await range.dispatch("change");
-  await flush();
-  assert.deepStrictEqual(hud.calls.setEffort, ["max"]);
+  assert.strictEqual(hud.calls.newSession, 1);
+  assert.strictEqual(hud.one("quick-status-text").textContent, "已排好，发消息时会在终端里打开");
+  assert.deepStrictEqual(hud.calls.setListOpen, [], "列表留着，用户得看见刚排出来的那一行");
 });
 
-test("quick panel: a push during a drag cannot move the thumb and a failed commit rolls back", async () => {
-  const dragging = await loadHud();
-  const dragRange = dragging.one("quick-effort-range");
-  dragRange.value = "4";
-  await dragRange.dispatch("input");
-  dragging.pushQuickState({ effort: "low" });
-  assert.strictEqual(dragRange.value, "4", "a push mid-drag must not steal the slider");
-  assert.strictEqual(dragging.one("quick-effort-value").textContent, "Max");
-  await dragRange.dispatch("change");
+test("quick panel: 新建会话失败时如实提示", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    newSessionResult: { status: "error", textKey: "hudNewSessionFailed" },
+  });
+  hud.pushQuickState({ listOpen: true, canCreateSession: true, sessions: [] });
+  await hud.find("quick-session-create")[0].dispatch("click");
   await flush();
-  assert.deepStrictEqual(dragging.calls.setEffort, ["max"]);
-
-  const failing = await loadHud({ setEffortResult: { status: "error" } });
-  const failRange = failing.one("quick-effort-range");
-  failRange.value = "2";
-  await failRange.dispatch("input");
-  await failRange.dispatch("change");
-  await flush();
-  assert.deepStrictEqual(failing.calls.setEffort, ["high"]);
-  assert.strictEqual(failRange.value, "1", "a failed commit rolls the thumb back");
-  assert.strictEqual(failing.one("quick-effort-value").textContent, "Medium");
-  assert.ok(failing.warnings.some(([level]) => level === "warn"));
+  assert.strictEqual(hud.one("quick-status-text").textContent, "新建会话失败");
+  assert.ok(hud.one("quick-status-text").classList.contains("is-error"));
 });
 
-test("quick panel: Escape closes an open menu only", async () => {
+test("quick panel: Esc 只收会话列表", async () => {
   const hud = await loadHud();
   await hud.document.dispatch("keydown", { key: "Escape" });
-  assert.deepStrictEqual(hud.calls.setMenuOpen, [], "a closed menu ignores Escape");
+  assert.deepStrictEqual(hud.calls.setListOpen, [], "没展开时按 Esc 什么都不做");
 
-  hud.pushQuickState({ menuOpen: true });
-  const event = await hud.document.dispatch("keydown", { key: "Escape" });
-  await flush();
-  assert.deepStrictEqual(hud.calls.setMenuOpen, [false]);
-  assert.strictEqual(event.defaultPrevented, true);
+  hud.pushQuickState({ listOpen: true, canCreateSession: true, sessions: [] });
+  await hud.document.dispatch("keydown", { key: "Escape" });
+  assert.deepStrictEqual(hud.calls.setListOpen, [false]);
 });
 
-/* ===== 快捷面板：指针进出卡片的点击穿透 ===== */
-
-test("click through: pointer moves report only when the inside/outside side changes", async () => {
+test("click through: 只有内外切换时才上报", async () => {
   const hud = await loadHud();
-  hud.setCardRect({ left: 0, top: 0, right: 300, bottom: 130 });
+  hud.setCardRect({ left: 0, top: 0, right: 300, bottom: 66 });
   await hud.document.dispatch("mousemove", { clientX: 500, clientY: 500 }); // 卡片外
   await hud.document.dispatch("mousemove", { clientX: 10, clientY: 10 });   // 卡片内
   await hud.document.dispatch("mousemove", { clientX: 20, clientY: 20 });   // 仍在卡片内
   assert.deepStrictEqual(hud.calls.setClickThrough, [true, false]);
 });
 
-test("click through: the card rect follows the menu height so the same point flips inside", async () => {
-  const hud = await loadHud();
-  hud.setCardRect({ left: 0, top: 0, right: 300, bottom: 130 }); // 收起态
-  await hud.document.dispatch("mousemove", { clientX: 150, clientY: 200 }); // 在收起卡片下方
-  assert.deepStrictEqual(hud.calls.setClickThrough, [true]);
-
-  hud.pushQuickState({ menuOpen: true });
-  hud.setCardRect({ left: 0, top: 0, right: 300, bottom: 316 }); // 展开态
-  await hud.document.dispatch("mousemove", { clientX: 150, clientY: 200 }); // 同一点落进卡片内
-  assert.deepStrictEqual(hud.calls.setClickThrough, [true, false]);
+test("面板新文案在 7 种语言里都齐全", () => {
+  for (const lang of SUPPORTED_LANGS) {
+    for (const key of [
+      "hudQuickPlaceholder", "hudQuickSendingTo", "hudQuickStatusIdle",
+      "hudQuickStatusWorking", "hudQuickSendFailed", "hudSendSent",
+      "hudSendCopied", "hudSendNeedsPermission", "hudSendNoSession",
+    ]) {
+      assert.ok(i18n[lang][key], `${lang}.${key} is required`);
+    }
+  }
 });
 
-/* ===== 快捷面板：状态行与输入行 ===== */
 
-test("quick panel: busy shows Working with the queue count and a stop button that stops chat", async () => {
-  const hud = await loadHud();
-  hud.pushQuickState({ busy: true, queuedCount: 2 });
-  assert.strictEqual(hud.one("quick-status-text").textContent, "Working · 2 queued");
-  const stopButton = hud.one("quick-stop-btn");
-  assert.strictEqual(stopButton.style.display, "");
-  await stopButton.dispatch("click");
-  assert.strictEqual(hud.calls.stopChat, 1);
+test("渲染端用到的每个 hud 文案键，7 种语言里都真的存在", () => {
+  // 渲染端要的键从源码里现抓，不手抄一份——漏加一个键，面板会把键名
+  // 原样显示给用户（"hudQuickXxx" 这种），这种事故只有源码对得上才发现得了。
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "session-hud-renderer.js"), "utf8");
+  const keys = new Set();
+  for (const match of src.matchAll(/"(hud[A-Za-z0-9]+)"/g)) keys.add(match[1]);
+  assert.ok(keys.size >= 20, `只抓到 ${keys.size} 个键，抓法大概过期了`);
 
-  hud.pushQuickState({ busy: false, queuedCount: 0 });
-  assert.strictEqual(hud.one("quick-status-text").textContent, "Idle");
-  assert.strictEqual(hud.one("quick-stop-btn").style.display, "none");
-});
+  // 主进程回给面板的 textKey 同样是文案键，一并卡住。
+  for (const key of [
+    "hudSendSent", "hudSendNoSession", "hudSendCopied", "hudSendNeedsPermission",
+    "hudQuickSendFailed", "hudNewSessionOpened", "hudNewSessionFailed",
+  ]) {
+    keys.add(key);
+  }
 
-test("quick panel: a missing working folder blocks sending with its own copy", async () => {
-  const hud = await loadHud();
-  hud.pushQuickState({ blocked: "no-cwd" });
-  assert.strictEqual(hud.one("quick-status-text").textContent, "Pick a working folder first");
-});
-
-test("quick panel: an error status paints the Error copy", async () => {
-  const hud = await loadHud();
-  hud.pushQuickState({ status: "error" });
-  assert.strictEqual(hud.one("quick-status-text").textContent, "Error");
-  assert.strictEqual(hud.one("quick-status-text").classList.contains("is-error"), true);
-});
-
-test("quick panel: Enter sends, an accepted prompt clears the field and releases the draft hold", async () => {
-  const hud = await loadHud();
-  const input = hud.one("quick-input");
-  input.value = "hi";
-  const event = await input.dispatch("keydown", { key: "Enter" });
-  assert.strictEqual(event.defaultPrevented, true);
-  await flush();
-  assert.deepStrictEqual(hud.calls.sendPrompt, ["hi"]);
-  assert.strictEqual(input.value, "");
-  assert.deepStrictEqual(hud.calls.setHold, [["draft", false]]);
-});
-
-test("quick panel: a queued prompt clears the field just like an accepted one", async () => {
-  const hud = await loadHud({ sendPromptResult: { status: "queued" } });
-  const input = hud.one("quick-input");
-  input.value = "hi";
-  await input.dispatch("keydown", { key: "Enter" });
-  await flush();
-  assert.deepStrictEqual(hud.calls.sendPrompt, ["hi"]);
-  assert.strictEqual(input.value, "");
-  assert.deepStrictEqual(hud.calls.setHold, [["draft", false]]);
-});
-
-test("quick panel: a full queue keeps the text and the notice clears after the 4s timer", async () => {
-  const hud = await loadHud({ sendPromptResult: { status: "full" } });
-  const input = hud.one("quick-input");
-  input.value = "hi";
-  await input.dispatch("keydown", { key: "Enter" });
-  await flush();
-  assert.strictEqual(hud.one("quick-status-text").textContent, "Queue full");
-  assert.strictEqual(hud.one("quick-status-text").classList.contains("is-error"), true);
-  assert.strictEqual(input.value, "hi");
-  assert.deepStrictEqual(hud.pendingTimerDelays(), [4000]);
-  hud.fireTimers();
-  assert.strictEqual(hud.one("quick-status-text").textContent, "Idle");
-  assert.strictEqual(hud.one("quick-status-text").classList.contains("is-error"), false);
-  assert.strictEqual(input.value, "hi");
-});
-
-test("quick panel: a failed send keeps the text and shows the failure notice", async () => {
-  const rejected = await loadHud({ sendPromptResult: { status: "error" } });
-  const rejectedInput = rejected.one("quick-input");
-  rejectedInput.value = "hi";
-  await rejectedInput.dispatch("keydown", { key: "Enter" });
-  await flush();
-  assert.strictEqual(rejected.one("quick-status-text").textContent, "Send failed");
-  assert.strictEqual(rejectedInput.value, "hi");
-
-  const thrown = await loadHud({ sendPromptThrows: true });
-  const thrownInput = thrown.one("quick-input");
-  thrownInput.value = "hi";
-  await thrownInput.dispatch("keydown", { key: "Enter" });
-  await flush();
-  assert.strictEqual(thrown.one("quick-status-text").textContent, "Send failed");
-  assert.strictEqual(thrownInput.value, "hi");
-  assert.ok(
-    thrown.warnings.some(([level]) => level === "warn"),
-    "a thrown send is caught and logged"
-  );
-});
-
-test("quick panel: IME composition Enter never sends", async () => {
-  const hud = await loadHud();
-  const input = hud.one("quick-input");
-  input.value = "hi";
-  await input.dispatch("keydown", { key: "Enter", isComposing: true });
-  await input.dispatch("keydown", { key: "Enter", keyCode: 229 });
-  assert.deepStrictEqual(hud.calls.sendPrompt, []);
-  await input.dispatch("keydown", { key: "Enter" });
-  await flush();
-  assert.deepStrictEqual(hud.calls.sendPrompt, ["hi"], "a plain Enter still sends");
-});
-
-test("quick panel: blank and whitespace-only drafts are never sent", async () => {
-  const hud = await loadHud();
-  const input = hud.one("quick-input");
-  input.value = "   ";
-  await input.dispatch("keydown", { key: "Enter" });
-  input.value = "";
-  await input.dispatch("keydown", { key: "Enter" });
-  assert.deepStrictEqual(hud.calls.sendPrompt, []);
-});
-
-test("quick panel: focus and draft holds follow focus and input emptiness", async () => {
-  const hud = await loadHud();
-  const input = hud.one("quick-input");
-  await input.dispatch("focus");
-  await input.dispatch("blur");
-  input.value = "draft";
-  await input.dispatch("input");
-  input.value = "";
-  await input.dispatch("input");
-  assert.deepStrictEqual(hud.calls.setHold, [
-    ["focus", true],
-    ["focus", false],
-    ["draft", true],
-    ["draft", false],
-  ]);
-});
-
-test("quick panel: the folder button shows the cwd name and fires pickWorkingDir", async () => {
-  const hud = await loadHud();
-  const button = hud.one("quick-folder-btn");
-  const label = hud.one("quick-folder-label");
-  assert.strictEqual(label.textContent, "Pick folder…");
-  hud.pushQuickState({ hasCwd: true, cwdName: "my-project" });
-  assert.strictEqual(label.textContent, "my-project");
-  assert.strictEqual(button.title, "my-project");
-  hud.pushQuickState({ hasCwd: false, cwdName: null });
-  assert.strictEqual(label.textContent, "Pick folder…");
-
-  await button.dispatch("click");
-  assert.strictEqual(hud.calls.pickWorkingDir, 1);
-});
-
-/* ===== 快捷面板：语言切换 ===== */
-
-test("quick panel: a language push re-labels every node without rebuilding it", async () => {
-  const hud = await loadHud();
-  const input = hud.one("quick-input");
-  const levelButton = hud.one("quick-level-btn");
-  const range = hud.one("quick-effort-range");
-  const modeOptions = hud.find("quick-mode-option");
-  input.value = "draft text";
-  hud.pushQuickState({ permissionMode: "auto", effort: "high" });
-
-  hud.pushLang({ lang: "zh", translations: HUD_ZH_TRANSLATIONS });
-
-  assert.strictEqual(hud.one("quick-input"), input, "the input node is reused");
-  assert.strictEqual(hud.one("quick-level-btn"), levelButton, "the level button is reused");
-  assert.strictEqual(hud.one("quick-effort-range"), range, "the slider is reused");
-  hud.find("quick-mode-option").forEach((el, index) => {
-    assert.strictEqual(el, modeOptions[index], "mode rows are reused");
-  });
-  assert.strictEqual(input.value, "draft text", "the draft survives the language change");
-  assert.strictEqual(input.placeholder, "输入消息，回车发送…");
-  assert.strictEqual(hud.one("quick-status-text").textContent, "空闲");
-  assert.strictEqual(hud.one("quick-stop-btn").getAttribute("aria-label"), "停止");
-  assert.strictEqual(hud.one("quick-level-label").textContent, "自动 · 高");
-  assert.strictEqual(levelButton.getAttribute("aria-label"), "权限模式 · 强度");
-  assert.deepStrictEqual(
-    hud.find("quick-mode-option").map((el) => byClass(el, "quick-mode-name")[0].textContent),
-    ["手动", "自动编辑", "计划", "自动"]
-  );
-  assert.deepStrictEqual(
-    hud.find("quick-mode-option").map((el) => byClass(el, "quick-mode-desc")[0].textContent),
-    ["危险操作前会先询问你", "文件修改自动放行，其余仍会询问", "只做方案，不执行任何操作", "由模型自动判断并放行"]
-  );
-  assert.strictEqual(hud.one("quick-effort-label").textContent, "强度");
-  assert.strictEqual(hud.one("quick-effort-value").textContent, "高");
-  assert.strictEqual(range.getAttribute("aria-label"), "强度");
+  for (const lang of SUPPORTED_LANGS) {
+    for (const key of keys) assert.ok(i18n[lang][key], `${lang}.${key} is required`);
+  }
 });
 
 test("unfocusable and folder feedback copy exists in all supported languages", () => {

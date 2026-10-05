@@ -2,14 +2,13 @@
 
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+// 新建会话的两个开关：允许值表与主进程拼启动参数用的是同一份，不另抄一遍。
+const { PERMISSION_MODES, EFFORT_LEVELS } = require("./session-new-options");
 
 const DASHBOARD_PAGE_URL = pathToFileURL(path.join(__dirname, "dashboard.html")).toString();
 const SESSION_HUD_PAGE_URL = pathToFileURL(path.join(__dirname, "session-hud.html")).toString();
 
-// 快捷输入面板允许的 effort / 权限模式取值（与 chat-session-runtime 同一份口径）。
-const QUICK_EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"];
-const QUICK_PERMISSION_MODES = ["default", "acceptEdits", "plan", "auto"];
-// 输入框文本上限与聊天窗口同宽（chat-ipc 的 MAX_SEND_LENGTH）。
+// 输入框文本上限：一句话，远不至于要 10 万字符（投递层另有 2000 的更紧上限）。
 const QUICK_PROMPT_MAX_LENGTH = 100000;
 
 function requiredDependency(value, name) {
@@ -81,8 +80,9 @@ function registerSessionIpc(options = {}) {
   }
 
   // 快捷输入面板（session-hud.html）的信任闸门，与 Dashboard 同一形状：
-  // 只认自家 HUD 窗口的主 frame。发送消息 / 切 effort / 选目录都是要花钱
-  // 或重置会话上下文的能力，绝不能被别的渲染端冒用。
+  // 只认自家 HUD 窗口的主 frame。发消息会把文字打进终端里那个真实会话、
+  // 新建会话会在终端里开进程、选文件夹会弹系统对话框——这些能力绝不能
+  // 被别的渲染端冒用。
   function isTrustedHudEvent(event) {
     const getContents = options.getSessionHudWebContents;
     const contents = typeof getContents === "function" ? getContents() : null;
@@ -244,13 +244,12 @@ function registerSessionIpc(options = {}) {
       quickResult("dismissFromRenderer", event, payload));
   }
 
-  // 快捷面板（输入块 + 设置块）只保留 i18n 与快捷动作通道；
-  // 会话行相关的 focus-session / open-session-folder / set-pinned /
-  // open-dashboard 已随会话显示功能一并删除。
+  // 快捷面板只保留 i18n 与快捷动作通道；会话行相关的 focus-session /
+  // open-session-folder / set-pinned / open-dashboard 已随会话显示功能一并删除。
   handle("session-hud:get-i18n", () => getI18n());
 
-  // ── 快捷输入面板（悬停 footer）：发消息 / 切设置 / 选目录 / 停止 / 保持显示 ──
-  // 全部走 HUD 信任闸门（发消息会花钱、切 effort/目录会重置会话上下文）；
+  // ── 快捷输入面板（悬停 footer）：发消息 / 保持显示 ──
+  // 全部走 HUD 信任闸门（发出去的话会进终端里那个真实会话）；
   // 一律先验信任再验载荷，不给伪造 sender 泄露「值非法」之类的差异信息。
   handle("session-hud:send-prompt", (event, payload) => {
     const rejected = rejectUntrustedHudEvent(event);
@@ -265,34 +264,56 @@ function registerSessionIpc(options = {}) {
     }
     return hudAction(event, options.quickSendPrompt, [text]);
   });
-  handle("session-hud:set-effort", (event, payload) => {
+  // 手选目标会话：列表可能过期，主进程会再核一遍会话还在不在。
+  handle("session-hud:select-session", (event, payload) => {
     const rejected = rejectUntrustedHudEvent(event);
     if (rejected) return rejected;
-    const value = payload && typeof payload.value === "string" ? payload.value : null;
-    if (!QUICK_EFFORT_VALUES.includes(value)) {
-      return { status: "error", message: `invalid effort "${value}"` };
-    }
-    return hudAction(event, options.quickSetEffort, [value]);
+    const sessionId = payload && typeof payload.sessionId === "string" ? payload.sessionId : "";
+    if (!sessionId) return { status: "error", message: "empty session id" };
+    return hudAction(event, options.quickSelectSession, [sessionId]);
   });
-  handle("session-hud:set-permission-mode", (event, payload) => {
+  // 会话列表展开/收起：只影响卡片高度与自动收起（hold），无副作用能力。
+  handle("session-hud:set-list-open", (event, payload) => {
     const rejected = rejectUntrustedHudEvent(event);
     if (rejected) return rejected;
-    const value = payload && typeof payload.value === "string" ? payload.value : null;
-    if (!QUICK_PERMISSION_MODES.includes(value)) {
-      return { status: "error", message: `invalid permission mode "${value}"` };
-    }
-    return hudAction(event, options.quickSetPermissionMode, [value]);
+    return hudAction(event, options.quickSetListOpen, [payload && payload.open === true]);
   });
-  handle("session-hud:pick-working-dir", (event) =>
-    hudAction(event, options.quickPickWorkingDir));
-  handle("session-hud:stop-chat", (event) =>
-    hudAction(event, options.quickStopChat));
-  // 二级设置菜单的展开状态：只影响卡片高度与自动收起（hold），无副作用能力。
-  // 只认严格布尔 true——其它值一律按收起处理，免得垃圾值把菜单点亮。
-  handle("session-hud:set-menu-open", (event, payload) => {
+  // 排一个「新会话」占位（真正的终端要等第一句话发出去才开）。
+  handle("session-hud:new-session", (event) => {
     const rejected = rejectUntrustedHudEvent(event);
     if (rejected) return rejected;
-    return hudAction(event, options.quickSetMenuOpen, [!!(payload && payload.open === true)]);
+    return hudAction(event, options.quickCreateSession);
+  });
+  // 取消那个占位。
+  handle("session-hud:cancel-pending-session", (event) => {
+    const rejected = rejectUntrustedHudEvent(event);
+    if (rejected) return rejected;
+    return hudAction(event, options.quickCancelPendingSession);
+  });
+  // 选「新建会话」落在哪个文件夹（主进程弹系统文件夹选择框）。
+  handle("session-hud:pick-folder", (event) => {
+    const rejected = rejectUntrustedHudEvent(event);
+    if (rejected) return rejected;
+    return hudAction(event, options.quickPickFolder);
+  });
+  // 切「新建会话」的权限模式 / 思考强度。这两个值会变成 claude 的启动参数，
+  // 所以按「键 → 允许值」表逐项卡形状：表是唯一入口，别的字符串一律 invalid。
+  const NEW_SESSION_OPTION_VALUES = {
+    permissionMode: PERMISSION_MODES,
+    effort: EFFORT_LEVELS,
+  };
+  handle("session-hud:set-new-session-option", (event, payload) => {
+    const rejected = rejectUntrustedHudEvent(event);
+    if (rejected) return rejected;
+    const keys = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? Object.keys(payload).sort()
+      : [];
+    if (keys.length !== 2 || keys[0] !== "key" || keys[1] !== "value") {
+      return { status: "invalid" };
+    }
+    const allowed = NEW_SESSION_OPTION_VALUES[payload.key];
+    if (!allowed || !allowed.includes(payload.value)) return { status: "invalid" };
+    return hudAction(event, options.quickSetNewSessionOption, [payload.key, payload.value]);
   });
   // 指针进出卡片时上报：卡片外的透明区让点击穿透到下面的应用。
   // 单向 send（高频、不需要回执），主进程侧另有轮询兜底。
