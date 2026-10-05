@@ -105,8 +105,6 @@ function makeCtx(overrides = {}) {
       }
       return { status: "ok" };
     },
-    newSessionWithFolder() {},
-    newSessionInCurrentDir() {},
     ...overrides,
   };
 }

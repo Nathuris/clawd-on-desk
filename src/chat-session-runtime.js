@@ -7,10 +7,23 @@
 // - 维护状态快照与消息列表，把 driver 事件归并成 UI 可渲染的数据；
 // - 调起 / 停止 SDK driver；effort 改变 = 开新会话，permissionMode 改变 = 中途热切换；
 // - 每次变化都用完整快照回调 onUpdate(state)，由上层推送 chat:update；
-// - 登记本 runtime 发起过的会话 id（isOwnedSession），供服务端路由识别内置对话。
+// - 登记本 runtime 发起过的会话 id（isOwnedSession），供服务端路由识别内置对话；
+// - 恢复历史会话（resumeSession）：停掉当前上下文后用 resume 选项重启 driver，
+//   启动前经注入的 loadBackfill 回填消息；getActiveSessionIds 供历史列表排除
+//   正在使用的会话。
 //
 // 状态形状（唯一数据形态）：
-//   { status, sessionId, cwd, effort, permissionMode, model, busy, messages }
+//   { status, sessionId, cwd, effort, permissionMode, model, busy, messages,
+//     commands, contextUsage }
+// commands 是 driver 在 init 后拉取的斜杠指令列表（[{name, description}]，
+// 可能为空）；换会话 / 换目录不主动清空，等新会话 init 后整体刷新。
+// contextUsage 是最近一轮 result 报上来的上下文用量
+// （{ percent, usedTokens, maxTokens }，字段可各自为 null；没数据时为 null）；
+// 会话上下文重置（stop / 换会话）会清空它。
+//
+// 消息时间戳：runtime 新建的每条消息都带 ts（毫秒时间戳，Date.now()）；
+// 回填消息沿用回填模块给的历史 ts（有就不覆盖），缺失时补当前时间——
+// 保证 state.messages 里每条消息都有数字 ts，渲染端只需处理一种形状。
 //
 // 权限确认不经过本模块：窗口内卡片已移除，只走桌宠原本的气泡路径
 // （Claude Code 的 PermissionRequest hook → 应用 /permission → 气泡）。
@@ -25,6 +38,9 @@
 
 const path = require("path");
 const createChatDriver = require("./chat-driver-sdk");
+// 上下文用量的归一化规则与 driver 共用一份（见 chat-driver-sdk 的
+// normalizeContextUsage）：畸形事件不会把坏形状写进 state。
+const normalizeContextUsage = createChatDriver.normalizeContextUsage;
 
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 const PERMISSION_MODES = ["default", "acceptEdits", "plan", "auto"];
@@ -33,6 +49,7 @@ const DEFAULT_PERMISSION_MODE = "acceptEdits";
 const MAX_MESSAGES = 200;
 const NOTICE_NEW_SESSION_FOR_EFFORT = "chatNoticeNewSessionForEffort";
 const NOTICE_DIR_CHANGED = "chatNoticeDirChanged";
+const NOTICE_HISTORY_RESUMED = "chatHistoryResumed";
 
 const BUSY_STATUSES = new Set(["starting", "thinking", "streaming", "tool"]);
 
@@ -50,6 +67,9 @@ function createChatSessionRuntime(options = {}) {
   const findClaudeCmd = typeof options.findClaudeCmd === "function" ? options.findClaudeCmd : null;
   const onUpdate = typeof options.onUpdate === "function" ? options.onUpdate : () => {};
   const driverFactory = typeof options.driverFactory === "function" ? options.driverFactory : createChatDriver;
+  // 历史回填注入缝：async (sessionId) => messages[]；主进程侧接 transcript 读取，
+  // 测试 / 无历史场景可不注入（null）。回填失败不阻塞恢复。
+  const loadBackfill = typeof options.loadBackfill === "function" ? options.loadBackfill : null;
 
   function readPref(key, fallback, isValid) {
     if (!settingsController || typeof settingsController.get !== "function") return fallback;
@@ -79,6 +99,8 @@ function createChatSessionRuntime(options = {}) {
     model: null,
     busy: false,
     messages: [],
+    commands: [],
+    contextUsage: null,
   };
 
   // 本 runtime 发起过的会话 id 登记表（见文件头注释）；只增不减。
@@ -86,6 +108,11 @@ function createChatSessionRuntime(options = {}) {
 
   let driver = null;
   let startInFlight = null;
+  // 下一次创建 driver 时要带上的 resume 会话 id（resumeSession 设置，init 到达 /
+  // 启动失败 / 上下文重置时清空），同时用于 getActiveSessionIds 排除该会话。
+  let pendingResumeSessionId = null;
+  // resumeSession 进行中标志：期间拒绝 send，避免和回填 / 重启 driver 交叉。
+  let resuming = false;
   // 当前 driver 是否已经收到过用户消息：用于区分“预启动”和“真的要发消息”。
   let turnRequestedInDriver = false;
   // 每次 stop / 换会话 +1；启动期间被取消的 send 按代次丢弃。
@@ -112,13 +139,32 @@ function createChatSessionRuntime(options = {}) {
     return {
       ...state,
       messages: state.messages.map((message) => ({ ...message })),
+      commands: state.commands.map((command) => ({ ...command })),
+      contextUsage: state.contextUsage ? { ...state.contextUsage } : null,
     };
+  }
+
+  // 会话上下文重置（stop / newSession / 换目录 / 换 effort / resumeSession）
+  // 时清空上下文用量（见文件头注释）。
+  function clearContextUsage() {
+    state.contextUsage = null;
   }
 
   // 该 session_id 是否属于本 runtime 发起的内置对话（driver init 事件登记过）。
   // 服务端路由靠它豁免「名单内编辑器窗口可见时压制」闸门。
   function isOwnedSession(sessionId) {
     return typeof sessionId === "string" && sessionId.length > 0 && ownedSessionIds.has(sessionId);
+  }
+
+  // 当前占用中的会话 id 列表（含正在恢复、还没等到 init 的会话），
+  // 供历史列表排除「正在聊的这个」。去重、不含空值。
+  function getActiveSessionIds() {
+    const ids = [];
+    if (typeof state.sessionId === "string" && state.sessionId) ids.push(state.sessionId);
+    if (pendingResumeSessionId && !ids.includes(pendingResumeSessionId)) {
+      ids.push(pendingResumeSessionId);
+    }
+    return ids;
   }
 
   function emit() {
@@ -129,12 +175,28 @@ function createChatSessionRuntime(options = {}) {
     }
   }
 
-  function addMessage(partial) {
-    const message = { id: nextMessageId(), ...partial };
-    state.messages.push(message);
-    if (state.messages.length > MAX_MESSAGES) {
-      state.messages.splice(0, state.messages.length - MAX_MESSAGES);
+  // 从头部把消息裁到 MAX_MESSAGES：system 提示（notice / error）不占额度、也不被
+  // 裁掉。回填置顶的「较早的消息已省略」提示一旦被裁，大文件历史就永远看不到
+  // 「历史不完整」的说明（见 adoptBackfilledMessages 与 resumeSession）。
+  function trimMessagesToLimit(messages) {
+    let excess = messages.length - MAX_MESSAGES;
+    if (excess <= 0) return;
+    for (let index = 0; index < messages.length && excess > 0;) {
+      if (messages[index].role === "system") {
+        index += 1;
+        continue;
+      }
+      messages.splice(index, 1);
+      excess -= 1;
     }
+  }
+
+  // 新建消息统一带 ts（毫秒时间戳）；partial 自带 ts 时不覆盖。
+  // 回填路径不走这里：由 adoptBackfilledMessages 处理（自带 ts 保留、缺失补当前时间）。
+  function addMessage(partial) {
+    const message = { id: nextMessageId(), ts: Date.now(), ...partial };
+    state.messages.push(message);
+    trimMessagesToLimit(state.messages);
     return message;
   }
 
@@ -151,6 +213,24 @@ function createChatSessionRuntime(options = {}) {
 
   function addNotice(key) {
     addMessage({ role: "system", kind: "notice", text: key });
+  }
+
+  // 采纳回填消息：形状与运行时消息一致，原样浅拷贝；id 缺失 / 重复时补运行时
+  // 序号 id，最后套用与实时消息相同的条数上限（从头部丢弃最旧的，system 提示除外）。
+  // ts 优先沿用回填模块给的历史时间（有就不覆盖）；缺失时补当前时间，
+  // 保证 state.messages 里每条消息都带数字 ts，渲染端不必处理两种形状。
+  function adoptBackfilledMessages(rawMessages) {
+    const adopted = [];
+    const seenIds = new Set();
+    for (const raw of Array.isArray(rawMessages) ? rawMessages : []) {
+      if (!raw || typeof raw !== "object") continue;
+      const id = typeof raw.id === "string" && raw.id && !seenIds.has(raw.id) ? raw.id : nextMessageId();
+      seenIds.add(id);
+      const ts = typeof raw.ts === "number" && Number.isFinite(raw.ts) ? raw.ts : Date.now();
+      adopted.push({ ...raw, id, ts });
+    }
+    trimMessagesToLimit(adopted);
+    return adopted;
   }
 
   function addError(text) {
@@ -213,6 +293,17 @@ function createChatSessionRuntime(options = {}) {
       summary: typeof event.summary === "string" ? event.summary : "",
       status: "running",
     });
+    // 改动对照：driver 只对 Edit / MultiEdit / Write 构建 diffPreview；
+    // 形状不完整（缺任一侧文本）时不给消息加字段。
+    const preview = event.diffPreview;
+    if (
+      preview
+      && typeof preview === "object"
+      && typeof preview.oldText === "string"
+      && typeof preview.newText === "string"
+    ) {
+      message.diff = { oldText: preview.oldText, newText: preview.newText };
+    }
     if (event.toolUseId) toolMessageIds.set(event.toolUseId, message.id);
     setStatus("tool");
     emit();
@@ -238,6 +329,8 @@ function createChatSessionRuntime(options = {}) {
     const isErrorResult = subtype.startsWith("error");
     // 正常情况下 result 到达时不会再有 running 卡片；兜底避免转圈不结束。
     finalizeRunningTools(isErrorResult ? "error" : "done");
+    // 上下文用量整体替换（事件缺失 / 形状畸形时为 null，表示「这轮没测到」）。
+    state.contextUsage = normalizeContextUsage(event.contextUsage);
     setStatus("idle");
     emit();
   }
@@ -252,6 +345,8 @@ function createChatSessionRuntime(options = {}) {
 
   function handleDriverExit(sourceDriver) {
     if (driver === sourceDriver) driver = null;
+    // 驱动退出（含未等到 init 的极端情况）：丢弃未消费的 resume 意图。
+    pendingResumeSessionId = null;
     turnRequestedInDriver = false;
     finalizeStreamingText();
     if (state.busy) {
@@ -267,6 +362,8 @@ function createChatSessionRuntime(options = {}) {
     if (!event || typeof event !== "object") return;
     switch (event.kind) {
       case "init":
+        // 驱动已确认会话身份：resume 意图消费完毕（含 fork 出新 id 的情况）。
+        pendingResumeSessionId = null;
         if (event.sessionId) {
           state.sessionId = event.sessionId;
           // 登记会话归属：服务端路由靠它豁免「编辑器可见时压制」（见文件头注释）。
@@ -274,6 +371,17 @@ function createChatSessionRuntime(options = {}) {
         }
         if (event.model) state.model = event.model;
         if (state.status === "starting") setStatus(turnRequestedInDriver ? "thinking" : "idle");
+        emit();
+        return;
+      case "commands":
+        // 指令列表是全量的：换会话 / 换目录不清空（旧列表仍可用），
+        // 新会话 init 后会重新拉取并整体覆盖。
+        state.commands = (Array.isArray(event.commands) ? event.commands : [])
+          .filter((command) => command && typeof command.name === "string" && command.name)
+          .map((command) => ({
+            name: command.name,
+            description: typeof command.description === "string" ? command.description : "",
+          }));
         emit();
         return;
       case "text":
@@ -318,6 +426,7 @@ function createChatSessionRuntime(options = {}) {
   async function resetSessionContext(noticeKey) {
     turnGeneration += 1;
     await disposeDriver();
+    pendingResumeSessionId = null;
     state.sessionId = null;
     state.model = null;
     finalizeStreamingText();
@@ -325,6 +434,7 @@ function createChatSessionRuntime(options = {}) {
     // 仍 running 的工具卡片在这里收尾，避免一直显示「运行中」。
     finalizeRunningTools("done");
     toolMessageIds.clear();
+    clearContextUsage();
     if (noticeKey) addNotice(noticeKey);
     setStatus("idle");
   }
@@ -370,6 +480,8 @@ function createChatSessionRuntime(options = {}) {
         effort: state.effort,
         permissionMode: state.permissionMode,
         executable,
+        // 历史续聊：带上待恢复的会话 id（普通新会话为 null）。
+        resume: pendingResumeSessionId,
         onEvent: (event) => handleDriverEvent(nextDriver, event),
       });
     } catch (err) {
@@ -426,11 +538,41 @@ function createChatSessionRuntime(options = {}) {
     }
   }
 
-  async function send(text) {
+  // 附件元数据只保留渲染需要的字段；没有可用项时不产生该可选字段。
+  // thumb 是渲染端压缩过的小图 data URL，可为空。
+  function normalizeAttachments(value) {
+    if (!Array.isArray(value)) return [];
+    const attachments = [];
+    for (const item of value) {
+      if (!item || typeof item !== "object") continue;
+      const attachment = {
+        name: typeof item.name === "string" ? item.name : "",
+        size: typeof item.size === "number" && Number.isFinite(item.size) ? item.size : 0,
+        isImage: !!item.isImage,
+      };
+      if (typeof item.thumb === "string" && item.thumb) attachment.thumb = item.thumb;
+      attachments.push(attachment);
+    }
+    return attachments;
+  }
+
+  // options 可选：{ blocks, attachments }
+  // - blocks：转发给 driver 的 Anthropic content block 数组（图片 / PDF 附件本体），
+  //   不放进 state；
+  // - attachments：附件元数据数组，存进用户消息对象供界面展示已发送的附件。
+  // 文本与 blocks 都空时拒绝；只有附件没有文字时消息 text 为空字符串，渲染端
+  // 只看 attachments。
+  async function send(text, options = {}) {
     const trimmed = typeof text === "string" ? text.trim() : "";
-    if (!trimmed) return false;
+    const blocks = options && Array.isArray(options.blocks) ? options.blocks : [];
+    if (!trimmed && !blocks.length) return false;
     if (!state.cwd) return false;
-    const userMessage = addMessage({ role: "user", kind: "text", text: trimmed });
+    // 恢复历史会话期间不接受新输入（界面同时被 busy 禁用，这里是兜底）。
+    if (resuming) return false;
+    const partial = { role: "user", kind: "text", text: trimmed };
+    const attachments = normalizeAttachments(options && options.attachments);
+    if (attachments.length) partial.attachments = attachments;
+    const userMessage = addMessage(partial);
     turnRequestedInDriver = true;
     const generation = turnGeneration;
     setStatus("thinking");
@@ -455,7 +597,7 @@ function createChatSessionRuntime(options = {}) {
     }
     if (!driver || typeof driver.send !== "function") return false;
     // 状态保持在 starting，等 SDK 的 init 事件到达后再切 thinking。
-    return driver.send(trimmed) !== false;
+    return driver.send(trimmed, blocks) !== false;
   }
 
   async function stop() {
@@ -470,6 +612,7 @@ function createChatSessionRuntime(options = {}) {
     // 中断时仍 running 的工具卡片不会再收到 tool-end / result，先行收尾，
     // 否则渲染端会一直显示「运行中」。
     finalizeRunningTools("done");
+    clearContextUsage();
     setStatus("idle");
     emit();
     return true;
@@ -478,14 +621,95 @@ function createChatSessionRuntime(options = {}) {
   async function newSession() {
     turnGeneration += 1;
     await disposeDriver();
+    pendingResumeSessionId = null;
     state.sessionId = null;
     state.model = null;
     state.messages = [];
     streamingTextId = null;
     toolMessageIds.clear();
+    clearContextUsage();
     setStatus("idle");
     emit();
     return true;
+  }
+
+  // 恢复历史会话：停掉当前会话上下文（不击杀整个 runtime），先回填历史消息，
+  // 再用 resume 选项重启 driver；cwd 保持当前工作目录不变。
+  // 回填是尽力而为，失败不阻塞恢复；新 driver 启动失败时状态回错误、
+  // 消息保留回填内容。返回 { status:'ok' } 或 { status:'error', message }。
+  async function resumeSession(options = {}) {
+    const rawId = options && options.sessionId;
+    const sessionId = typeof rawId === "string" ? rawId.trim() : "";
+    if (!sessionId) return { status: "error", message: "invalid session id" };
+    if (!state.cwd) return { status: "error", message: "no working directory" };
+    if (resuming) return { status: "error", message: "resume already in progress" };
+
+    resuming = true;
+    turnGeneration += 1;
+    const generation = turnGeneration;
+    try {
+      // 清理顺序：旧 driver 先释放，再回填消息，最后启动带 resume 的新 driver。
+      await disposeDriver();
+      pendingResumeSessionId = null;
+      state.sessionId = null;
+      state.model = null;
+      finalizeStreamingText();
+      // 旧 driver 的事件不会再被处理，仍 running 的工具卡片在这里收尾；
+      // 稍后回填会用历史记录里的最终状态整体替换。
+      finalizeRunningTools("done");
+      toolMessageIds.clear();
+      clearContextUsage();
+      setStatus("starting");
+      emit();
+
+      // 回填缝优先用在调用参数里转交的实现（IPC 侧注入），其次用构造时注入的。
+      const backfillLoader = options && typeof options.loadBackfill === "function"
+        ? options.loadBackfill
+        : loadBackfill;
+      let backfill = [];
+      if (backfillLoader) {
+        try {
+          const loaded = await backfillLoader(sessionId);
+          // 兼容两种回填结果形态：直接给消息数组，或 { messages, truncated }。
+          if (Array.isArray(loaded)) backfill = loaded;
+          else if (loaded && Array.isArray(loaded.messages)) backfill = loaded.messages;
+        } catch (err) {
+          console.warn("Clawd: chat session backfill failed:", err && err.message);
+        }
+      }
+      // 回填期间被 stop / 换会话 / 新会话取消：不再启动恢复。
+      if (generation !== turnGeneration) {
+        if (state.status === "starting") {
+          setStatus("idle");
+          emit();
+        }
+        return { status: "error", message: "resume cancelled" };
+      }
+
+      state.messages = adoptBackfilledMessages(backfill);
+      addNotice(NOTICE_HISTORY_RESUMED);
+      emit();
+
+      pendingResumeSessionId = sessionId;
+      const started = await startDriver();
+      if (!started) {
+        if (pendingResumeSessionId === sessionId) pendingResumeSessionId = null;
+        return {
+          status: "error",
+          message: generation === turnGeneration ? "failed to start resumed session" : "resume cancelled",
+        };
+      }
+      // 续聊模式下 CLI 要等第一条输入才发 init 事件：不能等 init 才恢复可输入状态，
+      // 否则界面一直停在「工作中」（发送禁用、只剩停止）。启动成功即视为就绪；
+      // 第一条消息发出时 init 会到达，turnRequestedInDriver 路径会接管状态流转。
+      if (generation === turnGeneration && !turnRequestedInDriver && state.status === "starting") {
+        setStatus("idle");
+        emit();
+      }
+      return { status: "ok" };
+    } finally {
+      resuming = false;
+    }
   }
 
   async function setEffort(value) {
@@ -536,9 +760,11 @@ function createChatSessionRuntime(options = {}) {
   return {
     getState,
     isOwnedSession,
+    getActiveSessionIds,
     send,
     stop,
     newSession,
+    resumeSession,
     setEffort,
     setPermissionMode,
     setWorkingDir,

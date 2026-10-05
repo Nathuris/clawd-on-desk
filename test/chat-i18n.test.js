@@ -42,6 +42,34 @@ const REQUIRED_CHAT_KEYS = [
   "chatNoticeDirChanged",
   "chatNoDirHint",
   "chatTitle",
+  // 阶段二：历史会话浮层与相对时间
+  "chatHistoryButton",
+  "chatHistoryLoading",
+  "chatHistoryEmpty",
+  "chatHistoryUntitled",
+  "chatHistoryLoadFailed",
+  "chatHistoryTruncated",
+  "chatHistoryResumed",
+  "chatJustNow",
+  "chatMinutesAgo",
+  "chatHoursAgo",
+  "chatDaysAgo",
+  // 阶段三：附件与斜杠指令
+  "chatAttachButton",
+  "chatAttachRemove",
+  "chatDropHint",
+  "chatCmdCompactDesc",
+  "chatCmdClearDesc",
+  "chatCmdHelpDesc",
+  "chatAttachmentLabel",
+  "chatAttachPickFailed",
+  // 阶段四：代码块复制 / diff 折叠 / 粘贴图片 / 状态栏用量
+  "chatCopyCode",
+  "chatCopied",
+  "chatDiffExpand",
+  "chatDiffCollapse",
+  "chatPasteFailed",
+  "chatContextUsage",
 ];
 
 function looksLikeChatStrings(value) {
@@ -81,6 +109,22 @@ test("chat i18n table covers every required key in all seven languages", () => {
       assert.equal(typeof value, "string", `${lang}.${key} must be a string`);
       assert.notEqual(value.trim(), "", `${lang}.${key} must not be empty`);
       assert.notEqual(value, key, `${lang}.${key} must not render as its own key`);
+    }
+  }
+});
+
+// 走模板替换的键：渲染端把 {n} 换成数字 / 金额，模板必须保留占位符。
+test("chat i18n templates keep the {n} placeholder", () => {
+  const strings = loadChatStrings();
+  const templateKeys = [
+    "chatMinutesAgo",
+    "chatHoursAgo",
+    "chatDaysAgo",
+    "chatContextUsage",
+  ];
+  for (const lang of SUPPORTED_LANGS) {
+    for (const key of templateKeys) {
+      assert.match(strings[lang][key], /\{n\}/, `${lang}.${key} must keep the {n} placeholder`);
     }
   }
 });

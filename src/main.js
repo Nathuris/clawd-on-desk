@@ -94,6 +94,15 @@ const { registerSettingsIpc } = require("./settings-ipc");
 const createChatWindowRuntime = require("./chat-window");
 const { registerChatIpc } = require("./chat-ipc");
 const { createChatSessionRuntime } = require("./chat-session-runtime");
+// 内置对话「历史会话 / 续聊」（阶段二）：与 Dashboard 共用同一份历史存储读取；
+// 回填消息按同样的目录编码规则定位记录文件并读尾部（chat-transcript-backfill）。
+const {
+  loadResumableSessionHistory,
+  resolveResumeTarget,
+  encodeClaudeProjectDir,
+  getClaudeProjectsDir,
+} = require("./session-history-loader");
+const { readTranscriptTail } = require("./chat-transcript-backfill");
 const createSettingsEffectRouter = require("./settings-effect-router");
 const { createRecapRuntime } = require("./recap-runtime");
 const { createKimiQuotaClient } = require("./kimi-quota-client");
@@ -974,6 +983,50 @@ chatWindowRuntime = createChatWindowRuntime({
   onAfterClosed: () => { try { chatRuntime.stop(); } catch {} },
 });
 
+// ── 内置对话：历史会话 / 续聊（阶段二）的主进程依赖 ──
+// 历史列表：与 Dashboard 共用 session-history-loader（确认可恢复优先 + 最近排序），
+// 排除进行中会话、条数上限由 chat-ipc 通道层负责；loader 在 limit 截断前先按
+// cwd（chat-ipc 传入）收窄，当前目录的会话不会被别的目录挤掉。
+// profile 固定默认：内置对话的 driver 与回填都不读自定义配置目录（见 loadChatBackfill），
+// 非默认 profile 的记录在这里就滤掉，避免列出必然恢复失败的会话。
+const CHAT_HISTORY_PROFILE = { kind: "default", configDir: null };
+function loadChatSessionHistory(options = {}) {
+  return loadResumableSessionHistory({ ...options, profile: CHAT_HISTORY_PROFILE });
+}
+
+// 按 historyKey 从历史存储反查可信记录（渲染端只交 historyKey，无权指定目录）。
+// 与列表同一口径：非默认 profile 的会话直接拒绝，不拉起找不到 transcript 的恢复。
+function resolveChatResumeTarget(agentId, historyKey) {
+  const target = resolveResumeTarget(agentId, historyKey);
+  if (!target || !target.profile || target.profile.kind !== "default") return null;
+  return target;
+}
+
+// 恢复前回填消息：按历史存储同款编码规则拼出记录文件路径
+// （~/.claude/projects/<编码cwd>/<sessionId>.jsonl），只读尾部还原消息
+//（截断提示已由 readTranscriptTail 放进消息列表）。读不到就回空数组，
+// 绝不挡住恢复本身。
+// 说明：session-history-loader 未导出 locateTranscript，这里用它导出的
+// 目录 / 编码工具重建同一路径；profile 固定为默认（与内置对话的 driver、
+// 历史列表的过滤口径一致，见 loadChatSessionHistory / resolveChatResumeTarget）。
+function loadChatBackfill(sessionId) {
+  try {
+    let cwd = null;
+    try { cwd = chatRuntime.getState().cwd; } catch {}
+    if (typeof sessionId === "string" && sessionId && cwd) {
+      const dirName = encodeClaudeProjectDir(cwd);
+      const projectsDir = getClaudeProjectsDir({ kind: "default", configDir: null });
+      if (dirName && projectsDir) {
+        const result = readTranscriptTail(path.join(projectsDir, dirName, `${sessionId}.jsonl`));
+        if (result && Array.isArray(result.messages)) return result.messages;
+      }
+    }
+  } catch (err) {
+    console.warn("Clawd: 读取历史对话回填失败:", err && err.message);
+  }
+  return [];
+}
+
 const chatRuntime = createChatSessionRuntime({
   settingsController: _settingsController,
   findClaudeCmd,
@@ -984,6 +1037,8 @@ const chatRuntime = createChatSessionRuntime({
   onUpdate: (state) => {
     if (chatIpcRuntime) chatIpcRuntime.pushUpdate(state);
   },
+  // 恢复历史会话前回填消息（阶段二）；chat-ipc 也会随 resumeSession 参数转交同一函数。
+  loadBackfill: loadChatBackfill,
 });
 
 const permissionAutomationConfirmationRuntime = createPermissionAutomationConfirmationRuntime({
@@ -4420,108 +4475,6 @@ async function sendTelegramApprovalTest() {
 // `syncPermissionShortcuts()` for hideBubbles) are now reactive and live in
 // the subscriber too.
 
-async function confirmDangerousMode(t) {
-  const parent = win && !win.isDestroyed() ? win : null;
-  const result = await electronDialog.showMessageBox(parent, {
-    type: "warning",
-    buttons: [t("confirm") || "Confirm", t("cancel") || "Cancel"],
-    defaultId: 1,
-    cancelId: 1,
-    title: t("dangerousConfirmTitle") || "Confirm Dangerous Mode",
-    message: t("dangerousConfirmMessage") || "Dangerous mode skips ALL permission checks.",
-  });
-  return result.response === 0;
-}
-
-// Await launchClaudeSession and surface failures instead of swallowing them:
-// show a localized error dialog so the user knows nothing happened, and log
-// for diagnosis. Never throws.
-async function runLaunchClaudeSession(t, mode, cwd, sessionId) {
-  let res;
-  try {
-    res = await launchClaudeSession(mode, cwd, sessionId);
-  } catch (err) {
-    console.error("[launch-claude] launch threw:", err);
-    res = { ok: false, message: (err && err.message) || String(err) };
-  }
-  if (res && res.ok) return res;
-  console.error("[launch-claude] launch failed:", res && res.message);
-  try {
-    const parent = win && !win.isDestroyed() ? win : null;
-    await electronDialog.showMessageBox(parent, {
-      type: "error",
-      buttons: [t("dismiss") || "OK"],
-      title: t("newSession") || "New Session",
-      message: t("launchFailed") || "Failed to launch Claude Code.",
-      detail: (res && res.message) || "",
-    });
-  } catch (err) {
-    console.error("[launch-claude] failed to show error dialog:", err);
-  }
-  return res;
-}
-
-function showResumeInput(t) {
-  return new Promise((resolve) => {
-    // data: URL — outside the file:// zoom map, so the scale is baked into the
-    // window size and an inline body zoom instead.
-    const resumeScale = getTextScaleForPetWindows();
-    const inputWin = new BrowserWindow({
-      width: scaleWidth(420, resumeScale),
-      height: scaleHeight(180, resumeScale),
-      resizable: false,
-      alwaysOnTop: true,
-      frame: false,
-      transparent: true,
-      skipTaskbar: true,
-      parent: win && !win.isDestroyed() ? win : undefined,
-      modal: true,
-      webPreferences: { nodeIntegration: false, contextIsolation: true },
-    });
-    const title = t("resumeSessionTitle") || "Resume Session";
-    const hint = t("resumeSessionHint") || "Enter Session ID";
-    const confirmLabel = t("confirm") || "OK";
-    const cancelLabel = t("dismiss") || "Cancel";
-    const html = `<!DOCTYPE html><html><head><style>
-      *{margin:0;padding:0;box-sizing:border-box}
-      body{zoom:${resumeScale};font-family:system-ui,-apple-system,sans-serif;background:#1e1e2e;color:#cdd6f4;display:flex;flex-direction:column;height:calc(100vh / ${resumeScale});padding:16px;border-radius:12px;overflow:hidden}
-      .title{font-size:14px;font-weight:600;margin-bottom:12px}
-      input{width:100%;padding:8px 12px;border:1px solid #45475a;border-radius:6px;background:#313244;color:#cdd6f4;font-size:13px;outline:none}
-      input:focus{border-color:#89b4fa}
-      input::placeholder{color:#6c7086}
-      .btns{display:flex;gap:8px;margin-top:14px;justify-content:flex-end}
-      button{padding:6px 16px;border:none;border-radius:6px;font-size:12px;cursor:pointer}
-      .ok{background:#89b4fa;color:#1e1e2e;font-weight:600}
-      .cancel{background:#45475a;color:#cdd6f4}
-    </style></head><body>
-      <div class="title">${title}</div>
-      <input id="sid" type="text" placeholder="${hint}" autofocus />
-      <div class="btns">
-        <button class="cancel" onclick="result(null)">${cancelLabel}</button>
-        <button class="ok" onclick="result(document.getElementById('sid').value)">${confirmLabel}</button>
-      </div>
-      <script>
-        function result(v){window._resolve(v)}
-        document.getElementById('sid').addEventListener('keydown',e=>{
-          if(e.key==='Enter')result(document.getElementById('sid').value);
-          if(e.key==='Escape')result(null);
-        });
-      </script>
-    </body></html>`;
-    inputWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-    inputWin.webContents.on("did-finish-load", () => {
-      inputWin.webContents.executeJavaScript(
-        "new Promise(r=>{window._resolve=r})"
-      ).then((val) => {
-        const sessionId = typeof val === "string" ? val.trim() : "";
-        resolve(sessionId || null);
-        try { inputWin.close(); } catch {}
-      });
-    });
-    inputWin.on("closed", () => resolve(null));
-  });
-}
-
 const _menuCtx = {
   get win() { return win; },
   get sessions() { return sessions; },
@@ -4611,76 +4564,6 @@ const _menuCtx = {
   checkForUpdates: (...args) => checkForUpdates(...args),
   getUpdateMenuItem: () => getUpdateMenuItem(),
   openDashboard: () => showDashboard(),
-  launchClaudeSession: (mode, cwd, sessionId) => launchClaudeSession(mode, cwd, sessionId),
-  newSessionWithFolder: async (t) => {
-    const parent = win && !win.isDestroyed() ? win : null;
-    const result = await electronDialog.showOpenDialog(parent, {
-      title: t("selectFolder"),
-      properties: ["openDirectory"],
-    });
-    if (result.canceled || !result.filePaths.length) return;
-    const folder = result.filePaths[0];
-    const mode = await electronDialog.showMessageBox(parent, {
-      type: "question",
-      buttons: [t("newSessionNormal"), t("newSessionDangerous"), t("newSessionContinue"), t("newSessionResume"), t("dismiss")],
-      defaultId: 0,
-      cancelId: 4,
-      title: t("newSession"),
-      message: t("newSession"),
-      detail: folder,
-    });
-    if (mode.response === 4) return;
-    if (mode.response === 3) {
-      const sessionId = await showResumeInput(t);
-      if (!sessionId) return;
-      const resumeMode = await electronDialog.showMessageBox(parent, {
-        type: "question",
-        buttons: [t("modeNormal"), t("modeDangerous"), t("dismiss")],
-        defaultId: 0,
-        cancelId: 2,
-        title: t("newSessionResume"),
-        message: sessionId,
-      });
-      if (resumeMode.response === 2) return;
-      if (resumeMode.response === 1 && !(await confirmDangerousMode(t))) return;
-      await runLaunchClaudeSession(t, resumeMode.response === 1 ? "resume-dangerous" : "resume", folder, sessionId);
-      return;
-    }
-    if (mode.response === 1 && !(await confirmDangerousMode(t))) return;
-    const modes = ["normal", "dangerous", "continue"];
-    await runLaunchClaudeSession(t, modes[mode.response], folder);
-  },
-  newSessionInCurrentDir: async (t) => {
-    const parent = win && !win.isDestroyed() ? win : null;
-    const mode = await electronDialog.showMessageBox(parent, {
-      type: "question",
-      buttons: [t("newSessionNormal"), t("newSessionDangerous"), t("newSessionContinue"), t("newSessionResume"), t("dismiss")],
-      defaultId: 0,
-      cancelId: 4,
-      title: t("newSession"),
-      message: t("newSession"),
-    });
-    if (mode.response === 4) return;
-    if (mode.response === 3) {
-      const sessionId = await showResumeInput(t);
-      if (!sessionId) return;
-      const resumeMode = await electronDialog.showMessageBox(parent, {
-        type: "question",
-        buttons: [t("modeNormal"), t("modeDangerous"), t("dismiss")],
-        defaultId: 0,
-        cancelId: 2,
-        title: t("newSessionResume"),
-        message: sessionId,
-      });
-      if (resumeMode.response === 2) return;
-      if (resumeMode.response === 1 && !(await confirmDangerousMode(t))) return;
-      await runLaunchClaudeSession(t, resumeMode.response === 1 ? "resume-dangerous" : "resume", undefined, sessionId);
-      return;
-    }
-    if (mode.response === 1 && !(await confirmDangerousMode(t))) return;
-    const modes = ["normal", "dangerous", "continue"];
-    await runLaunchClaudeSession(t, modes[mode.response]);
-  },
   // The settings controller is the only writer of persisted prefs. Toggle
   // setters above route through it; resize/sendToDisplay use
   // flushRuntimeStateToPrefs to capture window bounds after movement.
@@ -5176,8 +5059,9 @@ const settingsIpcRuntime = registerSettingsIpc({
   getLanWsServer: () => _lanWss,
 });
 
-// 内置对话的 IPC 通道（invoke + 状态推送）。app 用于监听窗口创建并在
-// did-finish-load 后首推状态；getLang 决定弹窗与推送载荷的语言。
+// 内置对话的 IPC 通道（invoke + 状态推送）。app 用于监听窗口创建、did-finish-load
+// 后首推状态，并给粘贴图片提供系统临时目录；shell 用于打开外链（仅 http/https）；
+// getLang 决定弹窗与推送载荷的语言。
 chatIpcRuntime = registerChatIpc({
   ipcMain,
   app,
@@ -5185,7 +5069,14 @@ chatIpcRuntime = registerChatIpc({
   chatRuntime,
   settingsController: _settingsController,
   dialog,
+  // 附件（阶段三）读文件用；显式注入便于测试替换。
+  fs,
+  shell,
   getLang: () => lang,
+  // 历史会话 / 续聊（阶段二）：读列表、按 historyKey 反查可信目标、恢复前回填。
+  loadHistory: loadChatSessionHistory,
+  resolveResumeTarget: resolveChatResumeTarget,
+  loadBackfill: loadChatBackfill,
 });
 
 const sessionHistoryRuntime = createSessionHistoryRuntime({

@@ -394,6 +394,48 @@ describe("session history loader", () => {
       assert.ok(rows.every((r) => r.group === "confirmed"), "the limit caps the visible list only");
     });
 
+    it("narrows to one cwd before the limit so another folder cannot crowd rows out", () => {
+      // 其他目录有 30 条更新的可恢复记录，当前目录只有一条更旧的：不先按 cwd
+      // 过滤的话，这条会被全局 top-25 挤掉（调用方再过滤已经来不及）。
+      const otherCwd = path.join(root, "other-project");
+      fs.mkdirSync(otherCwd, { recursive: true });
+      for (let i = 0; i < 30; i++) {
+        record(`other-${i}`, T0 + 1000 + i, BOOT_A, { cwd: otherCwd });
+        writeTranscript(`other-${i}`, otherCwd);
+      }
+      record("mine", T0, BOOT_A);
+      writeTranscript("mine");
+
+      const unfiltered = loadResumableSessionHistory(loadOpts());
+      assert.equal(
+        unfiltered.some((row) => row.sessionId === "mine"),
+        false,
+        "fixture 自检：不过滤时当前目录的旧会话确实落在可见列表之外",
+      );
+
+      const rows = loadResumableSessionHistory(loadOpts({ cwd: projectCwd }));
+      assert.deepEqual(rows.map((row) => row.sessionId), ["mine"]);
+      assert.equal(rows[0].group, "confirmed");
+    });
+
+    it("narrows to one profile when asked, excluding other profiles' sessions", () => {
+      const customConfigDir = path.join(root, "custom-claude");
+      record("default-one", T0, BOOT_A);
+      record("custom-one", T0 + 1000, BOOT_A, {}, {
+        env: { CLAUDE_CONFIG_DIR: customConfigDir },
+      });
+      writeTranscript("default-one");
+      writeTranscript("custom-one");
+
+      const all = loadResumableSessionHistory(loadOpts());
+      assert.equal(all.length, 2);
+
+      const rows = loadResumableSessionHistory(loadOpts({
+        profile: { kind: "default", configDir: null },
+      }));
+      assert.deepEqual(rows.map((row) => row.sessionId), ["default-one"]);
+    });
+
     it("keeps a resumable row visible when unresumable records rank newer", () => {
       // Thirty recency-ranked records without transcripts would fill the
       // whole visible list under a first-N read; grouping must keep the one

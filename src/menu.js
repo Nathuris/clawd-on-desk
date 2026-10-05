@@ -522,23 +522,6 @@ module.exports = function initMenu(ctx) {
         label: t("openRecap"),
         click: () => ctx.openSettingsWindow({ tab: "recap" }),
       },
-      {
-        label: t("newSession"),
-        submenu: [
-          {
-            label: t("newSessionSelectFolder"),
-            click: () => {
-              if (typeof ctx.newSessionWithFolder === "function") ctx.newSessionWithFolder(t);
-            },
-          },
-          {
-            label: t("newSessionHomeDir"),
-            click: () => {
-              if (typeof ctx.newSessionInCurrentDir === "function") ctx.newSessionInCurrentDir(t);
-            },
-          },
-        ],
-      },
       // Danger auto-approve sits at the tail of the work group: it governs how
       // agent permission requests are handled, and keeping it here (rather than
       // near the top) makes it harder to hit by accident.

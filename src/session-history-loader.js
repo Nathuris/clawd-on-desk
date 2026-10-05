@@ -203,6 +203,12 @@ function loadResumableSessionHistory(options = {}) {
   const activeRawSessionIds = options.activeRawSessionIds instanceof Set
     ? options.activeRawSessionIds
     : new Set();
+  // Optional caller-side narrowings, applied before `limit` truncation: the
+  // embedded chat asks for one folder under the default profile, and without
+  // these a handful of newer sessions elsewhere would crowd its rows out of
+  // the global top-N (the caller filters again, but too late by then).
+  const cwdFilter = typeof options.cwd === "string" && options.cwd ? options.cwd : null;
+  const profileFilter = normalizeClaudeProfile(options.profile);
 
   const records = loadSessionHistory({ ...options, limit: undefined });
   const projectEntriesCache = new Map();
@@ -214,6 +220,15 @@ function loadResumableSessionHistory(options = {}) {
   const locatedPaths = new Map();
   for (const record of records) {
     if (activeRawSessionIds.has(record.sessionId)) continue;
+    if (cwdFilter && record.cwd !== cwdFilter) continue;
+    if (profileFilter) {
+      const recordProfile = normalizeClaudeProfile(record.profile);
+      if (
+        !recordProfile
+        || recordProfile.kind !== profileFilter.kind
+        || recordProfile.configDir !== profileFilter.configDir
+      ) continue;
+    }
     const profileVerified = record.version >= 2 && !!normalizeClaudeProfile(record.profile);
     const located = profileVerified
       ? locateTranscript(
