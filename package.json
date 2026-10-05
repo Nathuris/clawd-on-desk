@@ -212,7 +212,6 @@
     "js-yaml": "^4.1.0"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.289",
     "@larksuiteoapi/node-sdk": "^1.71.1",
     "electron-updater": "^6.8.3",
     "htmlparser2": "^12.0.0",

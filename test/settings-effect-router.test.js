@@ -65,7 +65,6 @@ function createHarness(options = {}) {
     hideUpdateBubbleForPolicy: () => calls.push(["hideUpdateBubbleForPolicy"]),
     refreshUpdateBubbleAutoClose: () => calls.push(["refreshUpdateBubbleAutoClose"]),
     repositionFloatingBubbles: () => calls.push(["repositionFloatingBubbles"]),
-    repositionChatWindow: () => calls.push(["repositionChatWindow"]),
     applyTextScale: () => calls.push(["applyTextScale"]),
     syncSessionHudVisibility: () => calls.push(["syncSessionHudVisibility"]),
     refreshDisplayedVisual: () => calls.push(["refreshDisplayedVisual"]),
@@ -188,18 +187,14 @@ describe("settings-effect-router", () => {
     }
   });
 
-  it("repositions the reply window once for each placement change", () => {
+  it("旧的回复窗口定位开关不再触发任何重排（那套设置已经删了）", () => {
     for (const changes of [
       { chatPositionMode: "corner" },
       { chatFixedCorner: "top-left" },
-      { chatPositionMode: "follow", chatFixedCorner: "bottom-left" },
     ]) {
       const { calls, emit } = createHarness();
       emit(changes);
-      assert.deepStrictEqual(calls, [
-        ["updateMirrors", changes],
-        ["repositionChatWindow"],
-      ]);
+      assert.deepStrictEqual(calls, [["updateMirrors", changes]]);
     }
   });
 

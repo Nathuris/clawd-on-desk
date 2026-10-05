@@ -281,12 +281,6 @@ module.exports = function initMenu(ctx) {
           if (typeof ctx.openDashboard === "function") ctx.openDashboard();
         },
       },
-      {
-        label: t("chatWithClaude"),
-        click: () => {
-          if (typeof ctx.openChatWindow === "function") ctx.openChatWindow();
-        },
-      },
       buildPermissionAutomationMenuItem(),
     ];
 
@@ -510,12 +504,6 @@ module.exports = function initMenu(ctx) {
         label: t("openDashboard"),
         click: () => {
           if (typeof ctx.openDashboard === "function") ctx.openDashboard();
-        },
-      },
-      {
-        label: t("chatWithClaude"),
-        click: () => {
-          if (typeof ctx.openChatWindow === "function") ctx.openChatWindow();
         },
       },
       {

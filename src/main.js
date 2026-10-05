@@ -89,22 +89,6 @@ const {
   createSettingsSizePreviewSession,
 } = require("./settings-size-preview-session");
 const { registerSettingsIpc } = require("./settings-ipc");
-// 内置 Claude 对话（阶段一）。chat-window 默认导出工厂（同 settings-window）；
-// chat-ipc / chat-session-runtime 用具名导出。
-const createChatWindowRuntime = require("./chat-window");
-const { registerChatIpc } = require("./chat-ipc");
-const { createChatSessionRuntime } = require("./chat-session-runtime");
-// 悬停面板输入框的排队（忙时排队、无目录阻塞、停止/换上下文清空）。
-const createChatPromptQueue = require("./chat-prompt-queue");
-// 内置对话「历史会话 / 续聊」（阶段二）：与 Dashboard 共用同一份历史存储读取；
-// 回填消息按同样的目录编码规则定位记录文件并读尾部（chat-transcript-backfill）。
-const {
-  loadResumableSessionHistory,
-  resolveResumeTarget,
-  encodeClaudeProjectDir,
-  getClaudeProjectsDir,
-} = require("./session-history-loader");
-const { readTranscriptTail } = require("./chat-transcript-backfill");
 const createSettingsEffectRouter = require("./settings-effect-router");
 const { createRecapRuntime } = require("./recap-runtime");
 const { createKimiQuotaClient } = require("./kimi-quota-client");
@@ -730,15 +714,9 @@ function getDashboardI18nPayload() {
   return { lang, translations: { ...dict } };
 }
 
-// 悬停面板的 i18n：dashboard 字典 + 内置对话字典（chat-i18n 的 effort /
-// 权限模式等键）。面板 footer 与会话 HUD 共用一份载荷（session-hud:get-i18n）。
-// chat-i18n 是 IIFE + globalThis 风格（与 settings-i18n 同款），require 即挂载。
-require("./chat-i18n");
+// 悬停面板的 i18n：面板和 Dashboard 用同一份字典（session-hud:get-i18n）。
 function getHudI18nPayload() {
-  const base = getDashboardI18nPayload();
-  const chatStrings = (globalThis.ClawdChatI18n && globalThis.ClawdChatI18n.STRINGS) || {};
-  const chat = chatStrings[base.lang] || chatStrings.en || {};
-  return { lang: base.lang, translations: { ...base.translations, ...chat } };
+  return getDashboardI18nPayload();
 }
 
 // First-run import of system-backed settings into prefs. The actual truth for
@@ -942,161 +920,6 @@ const settingsWindowRuntime = createSettingsWindowRuntime({
     maybeDestroyIdleAnimationPreviewPosterWindow();
   },
 });
-
-// ── 内置 Claude 对话（阶段一）──
-let chatWindowRuntime = null;
-// registerChatIpc 的返回值（含 pushUpdate / dispose）。runtime 先创建、IPC 后
-// 注册，推送出口用这个可空的前向引用；注册前的状态变化由加载首推 + get-state 兜底。
-let chatIpcRuntime = null;
-
-function getChatWindow() {
-  return chatWindowRuntime ? chatWindowRuntime.getWindow() : null;
-}
-
-// 换上下文（用户点停止 / 新会话 / 恢复 / 换目录）时清空快捷输入队列。
-// 「首次选定工作目录」是例外：可能正有 blocked:"no-cwd" 的消息等着这一刻
-// 放行，清了就等于把用户的话丢了——所以按「之前有没有目录」区分。
-function clearQueueForContextReset(reason) {
-  if (!chatPromptQueue) return;
-  if (reason === "dir-changed") {
-    let hadCwd = false;
-    try { hadCwd = !!chatRuntime.getState().cwd; } catch {}
-    if (!hadCwd) return; // 首选目录：留队，等 cwd 边沿自动放行
-  }
-  chatPromptQueue.clear(reason);
-}
-
-// 选择工作目录（聊天窗口引导 / 目录按钮 / 悬停面板的文件夹按钮共用一份流程）：
-// prefs（chatLastWorkingDir）+ runtime.setWorkingDir（会重置会话上下文）。
-async function pickChatWorkingDir() {
-  const parent = getChatWindow();
-  const dialogOptions = { properties: ["openDirectory", "createDirectory"] };
-  let result;
-  try {
-    result = parent && !parent.isDestroyed()
-      ? await dialog.showOpenDialog(parent, dialogOptions)
-      : await dialog.showOpenDialog(dialogOptions);
-  } catch (err) {
-    console.warn("Clawd: chat working dir dialog failed:", err && err.message);
-    return { status: "error", message: err && err.message };
-  }
-  const picked = result && !result.canceled && Array.isArray(result.filePaths)
-    ? result.filePaths[0]
-    : null;
-  if (!picked) return { status: "canceled" };
-  // prefs 校验失败只告警，不挡住本次会话使用该目录（与 chat-ipc 的选择流程一致）。
-  try {
-    const applyResult = _settingsController.applyUpdate("chatLastWorkingDir", picked);
-    if (applyResult && applyResult.status === "error") {
-      console.warn("Clawd: failed to persist chatLastWorkingDir:", applyResult.message);
-    }
-  } catch (err) {
-    console.warn("Clawd: failed to persist chatLastWorkingDir:", err && err.message);
-  }
-  // 重选同一目录不算「换目录」（setWorkingDir 对同目录是 no-op、不重置上下文），
-  // 不能把排队消息误清掉。
-  let currentCwd = null;
-  try { currentCwd = chatRuntime.getState().cwd; } catch {}
-  if (picked !== currentCwd) clearQueueForContextReset("dir-changed");
-  try { await chatRuntime.setWorkingDir(picked); } catch (err) {
-    console.warn("Clawd: chat setWorkingDir failed:", err && err.message);
-    return { status: "error", message: err && err.message };
-  }
-  pushQuickState();
-  return { status: "ok", path: picked };
-}
-
-// 首开引导：还没有工作目录时弹一次目录选择（取消则维持空目录，渲染端会
-// 禁用输入并显示「请先选择工作目录」）。
-async function promptChatWorkingDirIfMissing() {
-  let cwd = null;
-  try { cwd = chatRuntime.getState().cwd; } catch {}
-  if (cwd) return;
-  await pickChatWorkingDir();
-}
-
-chatWindowRuntime = createChatWindowRuntime({
-  app,
-  BrowserWindow,
-  nativeTheme,
-  path,
-  getNearestWorkArea: (cx, cy) => getNearestWorkArea(cx, cy),
-  getTextScale: (bounds) => effectiveTextScaleForKey(
-    getDisplayKeyForBounds(bounds) || getSettingsDisplayKey()
-  ),
-  getSavedBounds: () => _settingsController.get("chatWindowBounds"),
-  onSaveBounds: (bounds) => _settingsController.applyUpdate("chatWindowBounds", bounds),
-  getTitle: () => translate("chatWindowTitle"),
-  // 阶段二：定位（跟随桌宠 / 固定角落）+ 关窗淡出。锚点矩形用桌宠画面本体，
-  // 比窗口外框更贴合；运行时拿不到时会自己退回桌宠窗口矩形。
-  getPetBounds: () => getPetWindowBounds(),
-  getAnchorRect: () => getSessionHudAnchorRect(getPetWindowBounds()),
-  // 「一条」版式：回复窗口贴在快捷面板卡片的顶边，同宽同列。
-  getPanelCardRect: () => _sessionHud.getPanelCardRect(),
-  getPrimaryWorkArea: () => getPrimaryWorkAreaSafe(),
-  getPositionMode: () => _settingsController.get("chatPositionMode"),
-  getFixedCorner: () => _settingsController.get("chatFixedCorner"),
-  isAppQuitting: () => isQuitting,
-  // 窗口开了/关了 → 面板要让位或收回，自动消失的状态也跟着收敛，立即重排一次。
-  onReplyWindowStateChanged: () => {
-    _sessionHud.noteReplyWindowStateChanged(!!getChatWindow());
-    repositionSessionHud();
-  },
-  // 首开且没有工作目录：页面加载完成后弹目录选择（见上面的引导函数）。
-  onDidFinishLoad: () => { void promptChatWorkingDirIfMissing(); },
-  // 关窗即停掉当前会话（interrupt 当前回合并释放 driver）；SDK 子进程留到
-  // 应用退出时由 chatRuntime.dispose() 统一清掉（见 before-quit）。
-  // 退出流程里 dispose 先于关窗发生，这里的 stop 兜底吞异常（幂等）。
-  // 先清排队再 stop：stop 回 idle 的边沿不能把排队消息发进已关的窗口会话。
-  onAfterClosed: () => {
-    clearQueueForContextReset("closed");
-    try { chatRuntime.stop(); } catch {}
-  },
-});
-
-// ── 内置对话：历史会话 / 续聊（阶段二）的主进程依赖 ──
-// 历史列表：与 Dashboard 共用 session-history-loader（确认可恢复优先 + 最近排序），
-// 排除进行中会话、条数上限由 chat-ipc 通道层负责；loader 在 limit 截断前先按
-// cwd（chat-ipc 传入）收窄，当前目录的会话不会被别的目录挤掉。
-// profile 固定默认：内置对话的 driver 与回填都不读自定义配置目录（见 loadChatBackfill），
-// 非默认 profile 的记录在这里就滤掉，避免列出必然恢复失败的会话。
-const CHAT_HISTORY_PROFILE = { kind: "default", configDir: null };
-function loadChatSessionHistory(options = {}) {
-  return loadResumableSessionHistory({ ...options, profile: CHAT_HISTORY_PROFILE });
-}
-
-// 按 historyKey 从历史存储反查可信记录（渲染端只交 historyKey，无权指定目录）。
-// 与列表同一口径：非默认 profile 的会话直接拒绝，不拉起找不到 transcript 的恢复。
-function resolveChatResumeTarget(agentId, historyKey) {
-  const target = resolveResumeTarget(agentId, historyKey);
-  if (!target || !target.profile || target.profile.kind !== "default") return null;
-  return target;
-}
-
-// 恢复前回填消息：按历史存储同款编码规则拼出记录文件路径
-// （~/.claude/projects/<编码cwd>/<sessionId>.jsonl），只读尾部还原消息
-//（截断提示已由 readTranscriptTail 放进消息列表）。读不到就回空数组，
-// 绝不挡住恢复本身。
-// 说明：session-history-loader 未导出 locateTranscript，这里用它导出的
-// 目录 / 编码工具重建同一路径；profile 固定为默认（与内置对话的 driver、
-// 历史列表的过滤口径一致，见 loadChatSessionHistory / resolveChatResumeTarget）。
-function loadChatBackfill(sessionId) {
-  try {
-    let cwd = null;
-    try { cwd = chatRuntime.getState().cwd; } catch {}
-    if (typeof sessionId === "string" && sessionId && cwd) {
-      const dirName = encodeClaudeProjectDir(cwd);
-      const projectsDir = getClaudeProjectsDir({ kind: "default", configDir: null });
-      if (dirName && projectsDir) {
-        const result = readTranscriptTail(path.join(projectsDir, dirName, `${sessionId}.jsonl`));
-        if (result && Array.isArray(result.messages)) return result.messages;
-      }
-    }
-  } catch (err) {
-    console.warn("Clawd: 读取历史对话回填失败:", err && err.message);
-  }
-  return [];
-}
 
 // ── 悬停面板：把一句话送到终端里那个会话 ──
 // 面板的输入框不再连内置 SDK 会话，而是把文字投递到终端 App 里正在跑的那个 CLI
@@ -1302,36 +1125,6 @@ function pushQuickState() {
   if (!_sessionHud || typeof _sessionHud.pushQuickState !== "function") return;
   _sessionHud.pushQuickState(buildQuickSendState());
 }
-
-const chatRuntime = createChatSessionRuntime({
-  settingsController: _settingsController,
-  findClaudeCmd,
-  // 权限确认走桌宠气泡：不注入 canUseTool，Claude Code 的 PermissionRequest
-  // hook 会打到应用自己的 /permission 路由（见 server-route-permission.js），
-  // 用户点气泡即完成决策。
-  // 经 chat-ipc 的 pushUpdate 推送（它会附带 lang 供渲染端 i18n 使用）；
-  // 同一状态再扇给排队器（忙→闲边沿放行下一条）与悬停面板（状态投影）。
-  onUpdate: (state) => {
-    if (chatIpcRuntime) chatIpcRuntime.pushUpdate(state);
-    if (chatPromptQueue) chatPromptQueue.handleRuntimeState(state);
-    // 面板已经不再连这个内置会话，但仍推一次状态：这一版里两者并存。
-    pushQuickState();
-  },
-  // 恢复历史会话前回填消息（阶段二）；chat-ipc 也会随 resumeSession 参数转交同一函数。
-  loadBackfill: loadChatBackfill,
-});
-
-chatPromptQueue = createChatPromptQueue({
-  send: (text) => chatRuntime.send(text),
-  isBusy: () => {
-    try { return chatRuntime.getState().busy === true; } catch { return false; }
-  },
-  hasCwd: () => {
-    try { return !!chatRuntime.getState().cwd; } catch { return false; }
-  },
-  // 队列计数变化（排队/发出/清空）也要刷给面板。
-  onChanged: () => pushQuickState(),
-});
 
 const permissionAutomationConfirmationRuntime = createPermissionAutomationConfirmationRuntime({
   BrowserWindow,
@@ -1866,13 +1659,6 @@ function applyTextScaleNow() {
     }
   } catch (err) {
     console.warn("Clawd: dashboard text scale failed:", err && err.message);
-  }
-  try {
-    if (chatWindowRuntime && typeof chatWindowRuntime.applyTextScale === "function") {
-      chatWindowRuntime.applyTextScale();
-    }
-  } catch (err) {
-    console.warn("Clawd: chat window text scale failed:", err && err.message);
   }
   repositionAnchoredFloatingSurfaces();
 }
@@ -2671,13 +2457,6 @@ function repositionFloatingBubbles() {
 
 function repositionAnchoredFloatingSurfaces() {
   const result = floatingWindowRuntime.repositionAnchoredSurfaces();
-  // 回复窗口跟随桌宠：桌宠漫步/被拖动、屏幕变化、缩放变化都会走到这里。
-  // 跟随模式之外、窗口没开或用户手动拖过时，reposition 内部自己直接返回。
-  if (chatWindowRuntime && typeof chatWindowRuntime.reposition === "function") {
-    try { chatWindowRuntime.reposition(); } catch (err) {
-      console.warn("Clawd: reposition chat window failed:", err && err.message);
-    }
-  }
   // #640: pet bounds changed — re-evaluate the editing-overlap dodge (a drag
   // can slide the pet over the bubble being typed into; the bubble itself is
   // frozen while editing, and roam is paused, so the pet is the mover here).
@@ -3355,49 +3134,6 @@ const _sessionHud = require("./session-hud")({
   onReservedOffsetChange: () => repositionFloatingBubbles(),
   // 二级菜单开合 / 面板收起会重置它：投影里带着 menuOpen，状态一变就重推一次。
   onQuickStateChanged: () => pushQuickState(),
-  // 「一条」版式：回复窗口开着且跟随中时返回它的高度，面板据此整体下移一半，
-  // 让「回复窗口 + 面板」这条竖条以桌宠为中心（否则高窗口会顶出屏幕、压住卡片）。
-  getAttachedReplyHeight: () => (
-    chatWindowRuntime && typeof chatWindowRuntime.getAttachedStackHeight === "function"
-      ? chatWindowRuntime.getAttachedStackHeight()
-      : 0
-  ),
-  // 回复窗口自身矩形：并进面板的自动收起热区，鼠标从面板走向桌宠/窗口时
-  // 面板不会提前溜掉。
-  getAttachedReplyRect: () => {
-    const chatWin = getChatWindow();
-    if (!chatWin || chatWin.isDestroyed()) return null;
-    try {
-      const bounds = chatWin.getBounds();
-      return bounds ? { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } : null;
-    } catch {
-      return null;
-    }
-  },
-  // 回复窗口的自动消失（和面板同一套节奏，见 reply-window-autohide.js）。
-  isReplyWindowOpen: () => !!getChatWindow(),
-  isReplyWindowFocused: () => {
-    const chatWin = getChatWindow();
-    if (!chatWin || chatWin.isDestroyed()) return false;
-    try {
-      return typeof chatWin.isFocused === "function" && chatWin.isFocused() === true;
-    } catch {
-      return false;
-    }
-  },
-  // Claude 正在回复（请求在跑 / 回复还在流）：窗口不能中途溜走。
-  isReplyBusy: () => {
-    try {
-      return chatRuntime.getState().busy === true;
-    } catch {
-      return false;
-    }
-  },
-  onReplyVisibilityChanged: (visible) => {
-    if (chatWindowRuntime && typeof chatWindowRuntime.setRevealed === "function") {
-      chatWindowRuntime.setRevealed(visible === true);
-    }
-  },
 });
 repositionSessionHud = _sessionHud.repositionSessionHud;
 repositionQuotaRing = _sessionHud.repositionQuotaRing;
@@ -3479,10 +3215,6 @@ const _serverCtx = {
   isAgentSubagentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentSubagentPermissionsEnabled(agentId),
   // 名单内编辑器窗口可见时不弹权限气泡：实时读设置，任何异常都 fail-open（不压制）。
   shouldSuppressPermissionForVisibleEditor: () => _editorVisibleGate.shouldSuppress(),
-  // 判断某个 session_id 是否属于应用内置的聊天会话：聊天会话由应用自己发起，
-  // 没有原生的确认界面，权限请求不能被「编辑器可见」压制闸门丢弃（见
-  // server-route-permission.js）。惰性取值，chatRuntime 已在文件上方定义。
-  isClawdChatSession: (id) => chatRuntime.isOwnedSession(id),
   isCodexNativeNotificationSoundEnabled: () => _runtimeAgentGate.isCodexNativeNotificationSoundEnabled(),
   isCodexPermissionInterceptEnabled: () => _runtimeAgentGate.isCodexPermissionInterceptEnabled(),
   codexSubagentClassifier: agentRuntime.getCodexSubagentClassifier(),
@@ -4033,17 +3765,6 @@ function drainRemoteSshAndFeishuBeforeQuit() {
     settingsIpcRuntime.dispose();
   } catch (err) {
     console.error("settings IPC shutdown failed:", err && err.message);
-  }
-  // 内置对话：先解绑 IPC，再等会话子进程收尾（5s 超时兜底，不卡退出）。
-  try {
-    if (chatIpcRuntime) chatIpcRuntime.dispose();
-  } catch (err) {
-    console.error("chat IPC shutdown failed:", err && err.message);
-  }
-  try {
-    drains.push(settleDrainWithin(chatRuntime.dispose(), 5000));
-  } catch (err) {
-    console.error("chat runtime shutdown failed:", err && err.message);
   }
   if (_remoteSshRuntime && typeof _remoteSshRuntime.shutdown === "function") {
     drains.push(
@@ -4936,7 +4657,6 @@ const _menuCtx = {
   getActiveThemeCapabilities: () => themeRuntime.getActiveThemeCapabilities(),
   ensureUserThemesDir: () => themeLoader.ensureUserThemesDir(),
   openSettingsWindow: (options) => settingsWindowRuntime.open(options),
-  openChatWindow: (options) => chatWindowRuntime.open(options),
   showTutorial: () => _tutorial.open(),
 };
 const _menu = require("./menu")(_menuCtx);
@@ -5016,14 +4736,6 @@ const settingsEffectRouter = createSettingsEffectRouter({
   sendSessionHudI18n: () => sendSessionHudI18n(),
   syncWindowTitles: () => {
     settingsWindowRuntime.applyTitleToWindow();
-    // 聊天窗口的页面标题固定为英文（chat.html），原生标题只有在这里重设；
-    // 再推一帧带新 lang 的状态，渲染端界面文案随语言切换即时刷新。
-    if (chatWindowRuntime && typeof chatWindowRuntime.applyTitleToWindow === "function") {
-      chatWindowRuntime.applyTitleToWindow();
-    }
-    if (chatIpcRuntime && typeof chatIpcRuntime.broadcastState === "function") {
-      chatIpcRuntime.broadcastState();
-    }
     // syncLocalization pushes BOTH the native title AND fresh renderer state
     // (dictionary/lang), so an external language change from Settings keeps
     // the tutorial body, buttons, and document.title in sync with the new
@@ -5042,14 +4754,6 @@ const settingsEffectRouter = createSettingsEffectRouter({
   hideUpdateBubbleForPolicy: () => callRuntimeMethod(_updateBubble, "hideForPolicy"),
   refreshUpdateBubbleAutoClose: () => callRuntimeMethod(_updateBubble, "refreshAutoCloseForPolicy"),
   repositionFloatingBubbles,
-  // 回复窗口的定位设置一变（跟随/角落、选哪个角）：立即重排并恢复跟随。
-  // 面板也要跟着重排一次——「一条」版式只在跟随时成立，切走/切回都要让位/收回。
-  repositionChatWindow: () => {
-    if (chatWindowRuntime && typeof chatWindowRuntime.reposition === "function") {
-      chatWindowRuntime.reposition({ force: true });
-    }
-    repositionSessionHud();
-  },
   applyTextScale: () => applyTextScaleNow(),
   syncSessionHudVisibility: () => syncSessionHudVisibility(),
   handleSessionHudPinnedChanged: (next) => {
@@ -5608,29 +5312,6 @@ function quickSetAttachments(count) {
     _sessionHud.setAttachments(count);
   }
 }
-
-chatIpcRuntime = registerChatIpc({
-  ipcMain,
-  app,
-  getChatWindow,
-  chatRuntime,
-  settingsController: _settingsController,
-  dialog,
-  // 附件（阶段三）读文件用；显式注入便于测试替换。
-  fs,
-  shell,
-  getLang: () => lang,
-  // 回复窗口默认隐藏「我自己的消息」（prefs chatShowUserMessages）。
-  getShowUserMessages: () => _settingsController.get("chatShowUserMessages") === true,
-  // 历史会话 / 续聊（阶段二）：读列表、按 historyKey 反查可信目标、恢复前回填。
-  loadHistory: loadChatSessionHistory,
-  resolveResumeTarget: resolveChatResumeTarget,
-  loadBackfill: loadChatBackfill,
-  // 悬停面板排队器的清理钩子：用户点停止 / 换上下文（新会话、恢复、换目录）
-  // 都要同步清队，防止排队消息发进已经变了的上下文。
-  onUserStop: () => clearQueueForContextReset("user-stop"),
-  onContextReset: (reason) => clearQueueForContextReset(reason),
-});
 
 const sessionHistoryRuntime = createSessionHistoryRuntime({
   getSessions: () => _state.sessions,

@@ -43,12 +43,6 @@ const BUBBLE_PLACEMENT_KEYS = new Set([
   "bubbleFixedCorner",
 ]);
 
-// 回复窗口的定位开关（跟随/角落、选哪个角）：改动后立即重排窗口。
-const CHAT_PLACEMENT_KEYS = new Set([
-  "chatPositionMode",
-  "chatFixedCorner",
-]);
-
 function requiredDependency(value, name) {
   if (!value) throw new Error(`createSettingsEffectRouter requires ${name}`);
   return value;
@@ -96,7 +90,6 @@ function createSettingsEffectRouter(options = {}) {
   const hideUpdateBubbleForPolicy = options.hideUpdateBubbleForPolicy || noop;
   const refreshUpdateBubbleAutoClose = options.refreshUpdateBubbleAutoClose || noop;
   const repositionFloatingBubbles = options.repositionFloatingBubbles || noop;
-  const repositionChatWindow = options.repositionChatWindow || noop;
   const applyTextScale = options.applyTextScale || noop;
   const syncSessionHudVisibility = options.syncSessionHudVisibility || noop;
   const handleSessionHudPinnedChanged = options.handleSessionHudPinnedChanged || noop;
@@ -292,10 +285,6 @@ function createSettingsEffectRouter(options = {}) {
     }
     if (Object.keys(changes).some((key) => BUBBLE_PLACEMENT_KEYS.has(key))) {
       safeCall(logWarn, "Clawd: repositionFloatingBubbles failed:", repositionFloatingBubbles);
-    }
-    if (Object.keys(changes).some((key) => CHAT_PLACEMENT_KEYS.has(key))) {
-      // force：无视死区、恢复跟随（用户上次的拖动不再算数），立即贴到新位置。
-      safeCall(logWarn, "Clawd: repositionChatWindow failed:", repositionChatWindow);
     }
     if ("textScale" in changes || "textScaleByDisplay" in changes) {
       // applyTextScale owns the whole cascade: per-display zoom on live text

@@ -1999,46 +1999,50 @@ describe("prefs.load", () => {
     }
   });
 
-  it("accepts the current v21 schema and locks an explicit v22 file", () => {
-    const currentPath = makeTempPath("v21.json");
-    fs.writeFileSync(currentPath, JSON.stringify({ version: 21, lang: "zh" }), "utf8");
+  it("accepts the current v22 schema and locks an explicit v23 file", () => {
+    const currentPath = makeTempPath("v22.json");
+    fs.writeFileSync(currentPath, JSON.stringify({ version: 22, lang: "zh" }), "utf8");
     const current = prefs.load(currentPath);
     assert.strictEqual(current.locked, false);
-    assert.strictEqual(current.snapshot.version, 21);
+    assert.strictEqual(current.snapshot.version, 22);
     assert.strictEqual(current.snapshot.lang, "zh");
 
-    const futurePath = makeTempPath("v22.json");
-    fs.writeFileSync(futurePath, JSON.stringify({ version: 22, lang: "ja" }), "utf8");
+    const futurePath = makeTempPath("v23.json");
+    fs.writeFileSync(futurePath, JSON.stringify({ version: 23, lang: "ja" }), "utf8");
     const originalWarn = console.warn;
     console.warn = () => {};
     try {
       const future = prefs.load(futurePath);
       assert.strictEqual(future.locked, true);
-      assert.strictEqual(future.snapshot.version, 22);
+      assert.strictEqual(future.snapshot.version, 23);
       assert.strictEqual(future.snapshot.lang, "ja");
     } finally {
       console.warn = originalWarn;
     }
   });
 
-  it("resets a wide legacy chat window so the new tall reply window can appear", () => {
-    const widePath = makeTempPath("v20-wide-chat.json");
-    fs.writeFileSync(widePath, JSON.stringify({
-      version: 20,
+  it("drops the leftover chat* keys now that the embedded client is gone", () => {
+    // 内置 Claude 对话整条删掉了，旧配置里的 chat* 键再也没人读——v21 -> v22
+    // 一次性清掉，别让它们在 prefs 里发霉。
+    const legacyPath = makeTempPath("v21-chat-keys.json");
+    fs.writeFileSync(legacyPath, JSON.stringify({
+      version: 21,
+      lang: "zh",
       chatWindowBounds: { x: 571, y: 452, width: 640, height: 480 },
+      chatLastWorkingDir: "/Users/me/谱子",
+      chatDefaultEffort: "high",
+      chatShowUserMessages: true,
+      chatPositionMode: "corner",
+      chatFixedCorner: "top-left",
+      chatDefaultPermissionMode: "plan",
     }), "utf8");
-    const wide = prefs.load(widePath);
-    assert.strictEqual(wide.snapshot.version, 21);
-    assert.strictEqual(wide.snapshot.chatWindowBounds, null);
+    const legacy = prefs.load(legacyPath);
 
-    // 窄窗口本来就是新形状，用户自己调过的大小要留着。
-    const narrowPath = makeTempPath("v20-narrow-chat.json");
-    fs.writeFileSync(narrowPath, JSON.stringify({
-      version: 20,
-      chatWindowBounds: { x: 40, y: 60, width: 300, height: 700 },
-    }), "utf8");
-    const narrow = prefs.load(narrowPath);
-    assert.deepStrictEqual(narrow.snapshot.chatWindowBounds, { x: 40, y: 60, width: 300, height: 700 });
+    assert.strictEqual(legacy.snapshot.version, 22);
+    assert.strictEqual(legacy.snapshot.lang, "zh", "别的设置照旧");
+    for (const key of Object.keys(legacy.snapshot)) {
+      assert.ok(!/^chat[A-Z]/.test(key), `${key} 不该还留在配置里`);
+    }
   });
 });
 

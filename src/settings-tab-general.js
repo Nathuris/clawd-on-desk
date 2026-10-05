@@ -62,11 +62,6 @@
     "bubbleFollowPreference",
     "bubbleFixedCorner",
   ]);
-  // 回复窗口的定位（跟随桌宠 / 固定角落），与气泡位置同款交互。
-  const CHAT_PLACEMENT_KEYS = new Set([
-    "chatPositionMode",
-    "chatFixedCorner",
-  ]);
   const SESSION_CLEANUP_NUMBER_KEYS = new Set([
     "sessionStaleMs",
     "workingStaleMs",
@@ -323,78 +318,6 @@
 
   // 「回复窗口」位置（阶段二）：跟随桌宠移动，或固定主屏幕的某个角落。
   // 交互与上面的气泡位置完全一致：模式二选一，选了「固定角落」才露出角落选择。
-  function buildChatWindowPlacementGroup() {
-    const group = document.createElement("div");
-    group.className = "bubble-placement-group chat-placement-group";
-    let syncConditionalVisibility = () => {};
-
-    const modeControl = helpers.buildSegmentedRadio({
-      value: state.snapshot && state.snapshot.chatPositionMode === "corner" ? "corner" : "follow",
-      ariaLabel: t("rowChatPlacement"),
-      className: "chat-placement-mode-segmented",
-      options: [
-        { value: "follow", label: t("chatPlacementFollow") },
-        { value: "corner", label: t("chatPlacementCorner") },
-      ],
-      onChange(nextMode) {
-        const mode = nextMode === "corner" ? "corner" : "follow";
-        return saveBubblePlacementValue("chatPositionMode", mode).then((accepted) => {
-          if (accepted) syncConditionalVisibility(mode === "corner");
-          return accepted;
-        });
-      },
-    });
-    const cornerControl = helpers.buildSegmentedRadio({
-      value: state.snapshot && state.snapshot.chatFixedCorner || "bottom-right",
-      ariaLabel: t("rowChatFixedCorner"),
-      className: "chat-fixed-corner-segmented",
-      options: [
-        { value: "top-left", label: t("bubbleCornerTopLeft") },
-        { value: "top-right", label: t("bubbleCornerTopRight") },
-        { value: "bottom-left", label: t("bubbleCornerBottomLeft") },
-        { value: "bottom-right", label: t("bubbleCornerBottomRight") },
-      ],
-      onChange: (value) => saveBubblePlacementValue("chatFixedCorner", value),
-    });
-
-    const modeRow = buildBubblePlacementRow({
-      labelKey: "rowChatPlacement",
-      descKey: "rowChatPlacementDesc",
-      className: "chat-placement-mode-row",
-      control: modeControl,
-    });
-    const cornerRow = buildBubblePlacementRow({
-      labelKey: "rowChatFixedCorner",
-      descKey: "rowChatFixedCornerDesc",
-      className: "chat-fixed-corner-row",
-      control: cornerControl,
-    });
-    group.appendChild(modeRow);
-    group.appendChild(cornerRow);
-
-    syncConditionalVisibility = (cornerMode) => {
-      cornerRow.hidden = !cornerMode;
-      cornerRow.setAttribute("aria-hidden", cornerMode ? "false" : "true");
-      cornerControl.setDisabled(!cornerMode);
-    };
-
-    state.mountedControls.chatPlacement = {
-      element: group,
-      modeRow,
-      cornerRow,
-      modeControl,
-      cornerControl,
-      syncFromSnapshot() {
-        const cornerMode = !!(state.snapshot && state.snapshot.chatPositionMode === "corner");
-        modeControl.setValue(cornerMode ? "corner" : "follow");
-        cornerControl.setValue(state.snapshot && state.snapshot.chatFixedCorner || "bottom-right");
-        syncConditionalVisibility(cornerMode);
-      },
-    };
-    state.mountedControls.chatPlacement.syncFromSnapshot();
-    return group;
-  }
-
   function buildRoamAreaRow() {
     const row = document.createElement("div");
     row.className = "row roam-area-row";
@@ -586,7 +509,6 @@
       }),
       buildBubblePolicyRow(),
       buildBubblePlacementGroup(),
-      buildChatWindowPlacementGroup(),
     ]));
 
     // Behavior & position: how the pet moves and sits on screen. Rarely changed
@@ -2618,13 +2540,6 @@
     return true;
   }
 
-  function syncChatPlacementFromSnapshot() {
-    const meta = state.mountedControls.chatPlacement;
-    if (!meta || !document.body.contains(meta.element)) return false;
-    meta.syncFromSnapshot();
-    return true;
-  }
-
   function patchInPlace(changes) {
     const keys = changes ? Object.keys(changes) : [];
     if (keys.length === 0) return false;
@@ -2700,8 +2615,8 @@
       if (SESSION_CLEANUP_NUMBER_KEYS.has(key)) continue;
       if (FLASH_NUMBER_KEYS.has(key)) continue;
       if (key === "roamConstrainAxis") continue;
-      // 气泡/回复窗口的定位不经 generalSwitches，由各自的 syncFromSnapshot 处理。
-      if (BUBBLE_PLACEMENT_KEYS.has(key) || CHAT_PLACEMENT_KEYS.has(key)) continue;
+      // 气泡定位不经 generalSwitches，由自己的 syncFromSnapshot 处理。
+      if (BUBBLE_PLACEMENT_KEYS.has(key)) continue;
       const meta = state.mountedControls.generalSwitches.get(key);
       if (!meta || !document.body.contains(meta.element)) return false;
     }
@@ -2732,7 +2647,6 @@
         continue;
       }
       if (BUBBLE_PLACEMENT_KEYS.has(key)) continue;
-      if (CHAT_PLACEMENT_KEYS.has(key)) continue;
       if (SESSION_CLEANUP_NUMBER_KEYS.has(key)) {
         state.mountedControls.sessionCleanupControls.get(key).syncFromSnapshot();
         continue;
@@ -2765,7 +2679,6 @@
       && !syncBubblePolicyControlsFromSnapshot()) return false;
     if ((keys.includes("hideBubbles") || keys.some((key) => BUBBLE_PLACEMENT_KEYS.has(key)))
       && !syncBubblePlacementFromSnapshot()) return false;
-    if (keys.some((key) => CHAT_PLACEMENT_KEYS.has(key)) && !syncChatPlacementFromSnapshot()) return false;
     if ((keys.includes("soundVolume") || keys.includes("soundMuted"))
       && state.mountedControls.soundSummary
       && document.body.contains(state.mountedControls.soundSummary.element)) {
