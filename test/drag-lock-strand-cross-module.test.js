@@ -57,6 +57,7 @@ function createRenderer() {
         exitMiniMode: () => {},
         showDashboard: () => {},
         revealSessionHud: () => {},
+        openChat: () => {},
         startDragReaction: () => {},
         endDragReaction: () => apiCalls.push(["endDragReaction"]),
         playClickReaction: () => {},

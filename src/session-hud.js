@@ -1,5 +1,24 @@
 "use strict";
 
+// 快捷面板（点击桌宠弹出）——单个整块窗口，默认贴桌宠左侧（放不下自动换
+// 右侧、再放不下落桌宠下方）：
+//   状态行 + 「权限模式 · effort」按钮 + 工作文件夹行 + 输入框（+ 停止按钮）
+// 点按钮展开二级设置菜单（权限模式列表 + effort 滑块），卡片随之变高
+// （QUICK_CARD → QUICK_CARD_EXPANDED，主进程按展开态重算窗口尺寸；
+//  底边钉住、只向上长，观感像拉开一个抽屉）。
+// 外加可选的配额环（quota-ring.html，独立小窗，原逻辑保留）。
+//
+// 活跃会话列表已删除（产品决定：不显示会话状态）。生命周期沿用原 HUD 契约：
+// - 单击桌宠 → revealFromPet()（hit-renderer 单击经 IPC 调到这里）
+// - 轮询盯「指针离开热区 + 500ms 宽限」自动收起；拖拽 / 右键菜单 / mini 立即收
+// - 输入框聚焦 / 有草稿（holdReasons）时面板不收起
+// - pinned（设置）时面板常显；sessionHudEnabled=false 时面板不出来（环独立）
+// - 面板打开期间漫游由 roam 侧读 isPanelOpen() 暂停（见 roam.js）
+//
+// 卡片尺寸/窗口壳常量必须与 session-hud.html 的 CSS 严格一致：
+//   收起 300×134 / 展开 300×316（二级菜单 182px）
+//   + 壳 top2/right3/bottom30(输入法候选窗净空)/left3 → 窗口 306×166 / 306×348
+
 const { BrowserWindow, screen } = require("electron");
 const path = require("path");
 const { keepOutOfTaskbar } = require("./taskbar");
@@ -10,34 +29,28 @@ const isLinux = process.platform === "linux";
 const isMac = process.platform === "darwin";
 const isWin = process.platform === "win32";
 
-const HUD_BORDER_Y = 2;
-const HUD_WIDTH = 240;
-const HUD_WIDTH_COMPACT = 190;
-const HUD_WIDTH_LABELS = 320;
-const HUD_WIDTH_LABELS_COMPACT = 260;
-const HUD_CONTEXT_USAGE_WIDTH_BUMP = 36;
-const HUD_LABELS_ONLY_WIDTH_TRIM = 36;
-const HUD_ROW_HEIGHT = 28;
-const HUD_MAX_EXPANDED_ROWS = 3;
-const HUD_MAX_EXPANDED_ROWS_LABELS = 5;
-const HUD_HEIGHT = HUD_ROW_HEIGHT + HUD_BORDER_Y;
-const HUD_WINDOW_SHELL = Object.freeze({
-  top: 2,
-  right: 3,
-  bottom: 8,
-  left: 3,
-});
-const HUD_PET_GAP = 4;
-const BUBBLE_GAP = 6;
+// 收起态：菜单高度 0，但仍算一个 4px 行距，6+16+4+28+4+0+4+28+4+32+6+2 = 134。
+const QUICK_CARD = Object.freeze({ width: 300, height: 134 });
+// 展开二级设置菜单后：菜单 0 → 182，即 134 + 182 = 316。
+const QUICK_CARD_EXPANDED = Object.freeze({ width: 300, height: 316 });
+const QUICK_SHELL = Object.freeze({ top: 2, right: 3, bottom: 30, left: 3 });
+const BLOCK_PET_GAP = 6;
+const BLOCK_WIDTH_GROWTH_RATIO = 0.4;
 const EDGE_MARGIN = 8;
 const WIN_TOPMOST_LEVEL = "pop-up-menu";
 const LINUX_WINDOW_TYPE = "toolbar";
 const MAC_FLOATING_TOPMOST_DELAY_MS = 120;
 const HOT_ZONE_PAD = 24;
-const AUTO_HIDE_POLL_MS = 200;
+const AUTO_HIDE_POLL_MS = 150;
 const HIDE_GRACE_MS = 500;
 const HIDDEN_WINDOW_DESTROY_MS = 30000;
-const HUD_WIDTH_GROWTH_RATIO = 0.4;
+// 面板淡入淡出：整窗透明度渐变，别直接闪出来。淡出走完才真正 hide()。
+const PANEL_FADE_MS = 140;
+const PANEL_FADE_STEPS = 6;
+// 缩窗只发生在窗口隐藏之后：macOS 合成器在「画面静止 + 窗口尺寸变化」的
+// 瞬间偶发亮出一帧错位画面（用户看到的"闪"），展开方向因为画面本来就在动
+// 所以看不出来，收起方向（动画结束、画面静止后缩窗）就非常明显。
+// 所以收起后先把目标尺寸记下来，等 hidePanel 真正隐藏的那一刻再缩。
 
 function clampToWorkArea(value, min, max) {
   if (max < min) return min;
@@ -52,35 +65,26 @@ function isScreenRect(rect) {
     && Number.isFinite(rect.bottom);
 }
 
-function isHudSession(session) {
-  return !!session && !session.headless && session.state !== "sleeping" && !session.hiddenFromHud;
+function rectsIntersect(a, b) {
+  if (!a || !b) return false;
+  return a.x < b.x + b.width
+    && b.x < a.x + a.width
+    && a.y < b.y + b.height
+    && b.y < a.y + a.height;
 }
 
-function snapshotHasVisibleSessions(snapshot) {
-  const sessions = Array.isArray(snapshot && snapshot.sessions) ? snapshot.sessions : [];
-  return sessions.some(isHudSession);
-}
-
+// 面板总开关（sessionHudEnabled，原「会话状态显示」）+ 配额环独立门。
 function evaluateBaseEligible({
-  snapshot,
   sessionHudEnabled,
   petHidden,
   miniMode,
   miniTransitioning,
-  showQuota,
-  hiddenQuotaProviders,
+  ringEligible,
 }) {
-  if (!snapshot) return false;
   if (petHidden) return false;
   if (miniMode || miniTransitioning) return false;
-  // The Session HUD (session cards) and the quota ring are INDEPENDENT: the
-  // HUD is gated by its own master switch, the ring by the quota switch. Either
-  // one being eligible reveals the floating UI on a pet click — so the ring can
-  // still be checked ("a remote's quota before starting work") even with the
-  // Session HUD turned off.
-  const hudEligible = sessionHudEnabled !== false && snapshotHasVisibleSessions(snapshot);
-  const ringEligible = countQuotaCoins(snapshot, showQuota, hiddenQuotaProviders) > 0;
-  return hudEligible || ringEligible;
+  const panelEligible = sessionHudEnabled !== false;
+  return panelEligible || ringEligible === true;
 }
 
 function pointInExpandedRect(point, rect, pad) {
@@ -92,13 +96,13 @@ function pointInExpandedRect(point, rect, pad) {
     && point.y <= rect.bottom + p;
 }
 
-function computeAutoHideHotZone({ petHitRect, expectedHudContentBounds, expectedRingContentBounds, pad }) {
+function computeAutoHideHotZone({ petHitRect, contentBoundsList, expectedRingContentBounds, pad }) {
   const rects = [];
   if (isScreenRect(petHitRect)) rects.push(petHitRect);
-  // Both the HUD (below the pet) and the quota ring (beside the pet) are part
-  // of the hot zone: the cursor moving from the pet onto either one must keep
-  // the whole floating UI alive.
-  for (const r of [expectedHudContentBounds, expectedRingContentBounds]) {
+  // 桌宠 + 面板 + 配额环都算热区：指针在宠物和面板之间移动都不能收起。
+  const candidates = Array.isArray(contentBoundsList) ? contentBoundsList.slice() : [];
+  candidates.push(expectedRingContentBounds);
+  for (const r of candidates) {
     if (!r) continue;
     if (Number.isFinite(r.x) && Number.isFinite(r.y)
         && Number.isFinite(r.width) && Number.isFinite(r.height)
@@ -120,32 +124,19 @@ function pointInHotZone(point, hotZone) {
 }
 
 function evaluateShouldShow({
-  snapshot,
-  sessionHudEnabled,
+  eligible,
   sessionHudPinned,
-  clickRevealed,
+  revealed,
   inHotZone,
   now,
   visibleHoldUntil,
   hideGraceMs,
-  petHidden,
-  miniMode,
-  miniTransitioning,
-  showQuota,
 }) {
-  const baseEligible = evaluateBaseEligible({
-    snapshot,
-    sessionHudEnabled,
-    petHidden,
-    miniMode,
-    miniTransitioning,
-    showQuota,
-  });
-  if (!baseEligible) return { show: false, nextHoldUntil: 0 };
+  if (eligible !== true) return { show: false, nextHoldUntil: 0 };
   if (sessionHudPinned === true) return { show: true, nextHoldUntil: 0 };
-  if (clickRevealed !== true) return { show: false, nextHoldUntil: 0 };
+  if (revealed !== true) return { show: false, nextHoldUntil: 0 };
 
-  // revealed 态：hot zone 续命 + grace period
+  // revealed 态：hot zone（或输入框持有）续命 + grace period
   let nextHoldUntil = Number.isFinite(visibleHoldUntil) ? visibleHoldUntil : 0;
   const tNow = Number.isFinite(now) ? now : 0;
   const grace = Number.isFinite(hideGraceMs) ? hideGraceMs : 0;
@@ -156,137 +147,105 @@ function evaluateShouldShow({
   return { show, nextHoldUntil };
 }
 
-function getHudMaxExpandedRows(showStateLabels = true) {
-  return showStateLabels === false ? HUD_MAX_EXPANDED_ROWS : HUD_MAX_EXPANDED_ROWS_LABELS;
-}
-
-function computeHudLayout(snapshot, options = {}) {
-  const sessions = (snapshot && Array.isArray(snapshot.sessions)) ? snapshot.sessions : [];
-  if (sessions.length === 0) return { expanded: [], folded: [], rowCount: 0 };
-  const byId = new Map(sessions.map((s) => [s.id, s]));
-  const orderedIds = (snapshot && Array.isArray(snapshot.orderedIds))
-    ? snapshot.orderedIds
-    : sessions.map((s) => s.id);
-  const ordered = orderedIds.map((id) => byId.get(id)).filter(Boolean);
-  const orderedSet = new Set(ordered.map((s) => s.id));
-  const missing = sessions.filter((s) => !orderedSet.has(s.id));
-  const visible = ordered.concat(missing).filter(isHudSession);
-  const maxExpandedRows = getHudMaxExpandedRows(options.showStateLabels);
-  const expanded = visible.slice(0, maxExpandedRows);
-  const folded = visible.slice(maxExpandedRows);
-  const rowCount = expanded.length + (folded.length > 0 ? 1 : 0);
-  return { expanded, folded, rowCount };
-}
-
-// One coin per (source, provider) with drawable quota. The pet-attached quota
-// ring lives in its OWN window (quota-ring.html), sized and placed by
-// quota-ring-geometry; the HUD no longer carries a quota strip. Here we only
-// need the count — quota alone can keep the pet's floating UI up (the "check a
-// remote's quota before starting work" moment), and the ring window is sized
-// from it.
 function countQuotaCoins(snapshot, showQuota, hiddenQuotaProviders) {
   return ringGeom.countQuotaCoins(snapshot, showQuota, hiddenQuotaProviders);
 }
 
-function computeHudHeight(rowCount) {
-  if (!Number.isFinite(rowCount) || rowCount <= 0) return HUD_ROW_HEIGHT;
-  return rowCount * HUD_ROW_HEIGHT + HUD_BORDER_Y;
-}
-
-function computeHudReservedOffset(cardHeight) {
-  const h = Number.isFinite(cardHeight) && cardHeight > 0 ? cardHeight : HUD_ROW_HEIGHT;
-  return HUD_PET_GAP + h + HUD_WINDOW_SHELL.bottom + BUBBLE_GAP;
-}
-
-function getHudWidthScale(scale) {
+function getBlockWidthScale(scale) {
   const s = clampTextScale(scale);
   if (s <= 1) return s;
-  return 1 + (s - 1) * HUD_WIDTH_GROWTH_RATIO;
+  return 1 + (s - 1) * BLOCK_WIDTH_GROWTH_RATIO;
 }
 
-function computeHudOuterWidth(width, scale, widthScale = scale) {
-  const s = clampTextScale(scale);
-  const ws = clampTextScale(widthScale);
-  return Math.round(width * ws)
-    + Math.round(HUD_WINDOW_SHELL.left * s)
-    + Math.round(HUD_WINDOW_SHELL.right * s);
-}
-
-function computeSessionHudBounds({ hitRect, anchorRect, workArea, width = HUD_WIDTH, height = HUD_HEIGHT, scale = 1, widthScale = scale }) {
+// 单块定位：首选桌宠左/右侧垂直居中；首选侧放不下换另一侧；
+// 两侧都放不下退到桌宠下方居中。
+//
+// baseCardH：展开态（二级菜单）用——按这个「收起高度」算出垂直居中的底边，
+// 再让当前（更高的）卡片从同一条底边往上长，这样展开只向上延伸，像拉开抽屉，
+// 而不是上下同时撑开。缺省时等同 cardH（普通居中）。
+function computeBlockBounds({
+  hitRect,
+  anchorRect,
+  workArea,
+  cardW,
+  cardH,
+  shell,
+  prefer = "left",
+  scale = 1,
+  widthScale = scale,
+  baseCardH,
+}) {
   const followRect = isScreenRect(anchorRect) ? anchorRect : hitRect;
   if (!isScreenRect(followRect) || !workArea) return null;
-  const followTop = Math.round(followRect.top);
-  const followBottom = Math.round(followRect.bottom);
-  const followCx = Math.round((followRect.left + followRect.right) / 2);
 
-  // width/height arrive in CSS px (HUD constants); rects are DIP. Convert
-  // everything page-rendered before mixing coordinate spaces. Height, shell and
-  // gaps keep full textScale, while width can grow more gently so a large-text
-  // HUD stays compact instead of turning into a banner.
   const s = clampTextScale(scale);
   const ws = clampTextScale(widthScale);
-  const dipWidth = Math.round(width * ws);
-  const dipHeight = Math.ceil(height * s);
-  const shell = {
-    top: Math.round(HUD_WINDOW_SHELL.top * s),
-    right: Math.round(HUD_WINDOW_SHELL.right * s),
-    bottom: Math.round(HUD_WINDOW_SHELL.bottom * s),
-    left: Math.round(HUD_WINDOW_SHELL.left * s),
+  const dipWidth = Math.round(cardW * ws);
+  const dipHeight = Math.ceil(cardH * s);
+  const sh = {
+    top: Math.round(shell.top * s),
+    right: Math.round(shell.right * s),
+    bottom: Math.round(shell.bottom * s),
+    left: Math.round(shell.left * s),
   };
-  const petGap = Math.round(HUD_PET_GAP * s);
-  const edgeMargin = Math.round(EDGE_MARGIN * s);
+  const gap = Math.round(BLOCK_PET_GAP * s);
+  const edge = Math.round(EDGE_MARGIN * s);
 
-  const outerWidth = dipWidth + shell.left + shell.right;
-  const outerHeight = dipHeight + shell.top + shell.bottom;
-  const minX = Math.round(workArea.x);
-  const maxX = Math.round(workArea.x + workArea.width - dipWidth);
-  const x = clampToWorkArea(followCx - Math.round(dipWidth / 2), minX, maxX);
+  const minX = Math.round(workArea.x + edge);
+  const maxX = Math.round(workArea.x + workArea.width - edge - dipWidth);
+  const minY = Math.round(workArea.y + edge);
+  const maxY = Math.round(workArea.y + workArea.height - edge - dipHeight);
+  const followCy = Math.round((followRect.top + followRect.bottom) / 2);
 
-  const belowY = followBottom + petGap;
-  const belowMax = workArea.y + workArea.height - edgeMargin;
-  if (belowY + dipHeight <= belowMax) {
-    const contentBounds = { x, y: belowY, width: dipWidth, height: dipHeight };
-    return {
-      bounds: {
-        x: contentBounds.x - shell.left,
-        y: contentBounds.y - shell.top,
-        width: outerWidth,
-        height: outerHeight,
-      },
-      contentBounds,
-      flippedAbove: false,
-    };
+  // 底边基准：收起高度垂直居中时的底边。展开态保持这条底边不动，
+  // 于是多出来的高度全部长在上方（不会向下顶到桌宠那边）。
+  const baseHeight = Math.ceil((Number.isFinite(baseCardH) ? baseCardH : cardH) * s);
+  const baseMinY = Math.round(workArea.y + edge);
+  const baseMaxY = Math.round(workArea.y + workArea.height - edge - baseHeight);
+  const baseY = clampToWorkArea(followCy - Math.round(baseHeight / 2), baseMinY, baseMaxY);
+  const y = clampToWorkArea(baseY + baseHeight - dipHeight, minY, maxY);
+
+  const sideX = (side) => (side === "left"
+    ? Math.round(followRect.left - gap - dipWidth)
+    : Math.round(followRect.right + gap));
+  const fits = (x) => x >= minX && x <= maxX;
+
+  let side = null;
+  let x = null;
+  for (const candidate of prefer === "right" ? ["right", "left"] : ["left", "right"]) {
+    const candidateX = sideX(candidate);
+    if (fits(candidateX)) {
+      side = candidate;
+      x = candidateX;
+      break;
+    }
   }
 
-  const minY = Math.round(workArea.y + edgeMargin);
-  const maxY = Math.round(workArea.y + workArea.height - edgeMargin - dipHeight);
-  const aboveY = followTop - dipHeight - petGap;
-  const contentBounds = {
-    x,
-    y: clampToWorkArea(aboveY, minY, maxY),
-    width: dipWidth,
-    height: dipHeight,
-  };
+  let contentBounds;
+  if (side === null) {
+    // 屏幕太窄，两侧都放不下：落到桌宠下方居中（下一层冲突消解会再错开）。
+    side = "below";
+    x = clampToWorkArea(
+      Math.round((followRect.left + followRect.right) / 2 - dipWidth / 2),
+      minX,
+      maxX
+    );
+    const belowY = clampToWorkArea(followRect.bottom + gap, minY, maxY);
+    contentBounds = { x, y: belowY, width: dipWidth, height: dipHeight };
+  } else {
+    contentBounds = { x, y, width: dipWidth, height: dipHeight };
+  }
+
   return {
     bounds: {
-      x: contentBounds.x - shell.left,
-      y: contentBounds.y - shell.top,
-      width: outerWidth,
-      height: outerHeight,
+      x: contentBounds.x - sh.left,
+      y: contentBounds.y - sh.top,
+      width: dipWidth + sh.left + sh.right,
+      height: dipHeight + sh.top + sh.bottom,
     },
     contentBounds,
-    flippedAbove: true,
+    side,
   };
-}
-
-function getHudWidth(showElapsed = true, showStateLabels = true, showContextUsage = false) {
-  const base = showStateLabels === false
-    ? (showElapsed === false ? HUD_WIDTH_COMPACT : HUD_WIDTH)
-    : (showElapsed === false ? HUD_WIDTH_LABELS_COMPACT : HUD_WIDTH_LABELS);
-  if (showStateLabels !== false && showContextUsage !== true) {
-    return Math.max(HUD_WIDTH_COMPACT, base - HUD_LABELS_ONLY_WIDTH_TRIM);
-  }
-  return showContextUsage === true ? base + HUD_CONTEXT_USAGE_WIDTH_BUMP : base;
 }
 
 function deferMacFloatingVisibility(ctx, win) {
@@ -303,31 +262,36 @@ function deferMacFloatingVisibility(ctx, win) {
 }
 
 module.exports = function initSessionHud(ctx) {
-  let hudWindow = null;
-  let didFinishLoad = false;
+  // 单个面板窗口（整块）；ring 独立窗口。
+  const panel = { win: null, loaded: false };
+  const hiddenDestroyTimers = { panel: null, ring: null };
+  // 淡入/淡出推进定时器
+  let panelOpacityTimer = null;
+  // 收起菜单后待应用的「隐藏时缩窗」目标（可见期间只记不缩）
+  let pendingHiddenBounds = null;
   let latestSnapshot = null;
-  let hudFlippedAbove = false;
-  let lastReservedOffset = 0;
-  const hiddenDestroyTimers = { hud: null, ring: null };
-  // Pet-attached quota ring — a sibling floating window (quota-ring.html) that
-  // shares this module's reveal / pin / grace / hot-zone lifecycle. The HUD now
-  // shows sessions only; the ring shows account quota beside the pet.
   let ringWindow = null;
   let ringDidFinishLoad = false;
   let ringSide = "left";
 
+  let pollTimer = null;
+  // 点击揭示状态机：单击桌宠 → revealFromPet() 置 revealed；
+  // 轮询盯「指针离开热区 + 宽限期」自动收起。
+  // holdReasons=渲染端报告的「不能收」原因（输入框聚焦/有草稿）。
+  let revealed = false;
+  const holdReasons = new Set();
+  let visibleHoldUntil = 0;
+  // 二级设置菜单（权限模式 + effort 滑块）是否展开：展开时卡片更高，
+  // 且 holdReasons 里钉一个 "menu" 让面板不被自动收起。
+  let expanded = false;
+  // 快捷面板的状态投影（effort/权限/忙碌/排队数…），主进程推来后转发面板窗口。
+  let latestQuickState = null;
+  let lastQuickStateJson = null;
+  // 上一次同步时是否画面上有东西（用于通知气泡重排，避免无谓调用）。
+  let lastAnyVisible = false;
+
   function getTextScale() {
     return clampTextScale(typeof ctx.getTextScale === "function" ? ctx.getTextScale() : 1);
-  }
-  let lastHudHeight = HUD_ROW_HEIGHT;
-  let pollTimer = null;
-  let clickRevealed = false;
-  let visibleHoldUntil = 0;
-
-  function getCurrentSnapshot() {
-    return typeof ctx.getSessionSnapshot === "function"
-      ? ctx.getSessionSnapshot()
-      : { sessions: [], groups: [], orderedIds: [], menuOrderedIds: [] };
   }
 
   function getMiniMode() {
@@ -338,33 +302,126 @@ module.exports = function initSessionHud(ctx) {
     return typeof ctx.getMiniTransitioning === "function" && ctx.getMiniTransitioning();
   }
 
+  function getCurrentSnapshot() {
+    return typeof ctx.getSessionSnapshot === "function"
+      ? ctx.getSessionSnapshot()
+      : { sessions: [], groups: [], orderedIds: [], menuOrderedIds: [] };
+  }
+
+  function ringEligible(snapshot = latestSnapshot) {
+    return countQuotaCoins(snapshot, ctx.sessionHudShowQuota !== false, ctx.quotaRingHiddenProviders) > 0;
+  }
+
   function baseEligible(snapshot = latestSnapshot) {
     return evaluateBaseEligible({
-      snapshot,
       sessionHudEnabled: ctx.sessionHudEnabled,
       petHidden: ctx.petHidden,
       miniMode: getMiniMode(),
       miniTransitioning: getMiniTransitioning(),
-      showQuota: ctx.sessionHudShowQuota !== false,
-      hiddenQuotaProviders: ctx.quotaRingHiddenProviders,
+      ringEligible: ringEligible(snapshot),
     });
   }
 
   function shouldShow(snapshot = latestSnapshot) {
     if (!baseEligible(snapshot)) return false;
     if (ctx.sessionHudPinned === true) return true;
-    return clickRevealed;
+    return revealed;
   }
 
+  // 轮询只为「已揭示的面板盯收起」（指针离开热区 + 宽限期）。
   function isAutoHidePollingNeeded() {
-    if (!baseEligible(latestSnapshot)) return false;
+    if (ctx.petHidden) return false;
+    if (getMiniMode() || getMiniTransitioning()) return false;
+    if (ctx.lowPowerIdleMode) return false;
     if (ctx.sessionHudPinned === true) return false;
-    return clickRevealed === true;
+    return revealed === true;
   }
 
-  function collectRingAvoidRects(hudContentBounds) {
+  // 发送等动作刚发生：收起面板（视线转移到弹出的对话窗口上）。
+  // 下一次点击会正常重新揭示（点击是明确意图，无需防回弹闩）。
+  function dismissForAction() {
+    clearReveal();
+    syncSessionHud(latestSnapshot || getCurrentSnapshot());
+  }
+
+  // 面板（含配额环）是否正显示：漫游判定读它——用户在输入/调设置时
+  // 宠物必须原地待命，不能一边输一边走。
+  function isPanelOpen() {
+    if (revealed) return true;
+    const win = panel.win;
+    if (win && !win.isDestroyed() && win.isVisible()) return true;
+    return !!(ringWindow && !ringWindow.isDestroyed() && ringWindow.isVisible());
+  }
+
+  // 二级设置菜单展开/收起：主进程是唯一状态源（渲染端只投影），
+  // 因为窗口高度要跟着变——渲染端自己做状态会跟窗口尺寸脱节。
+  function setMenuOpen(open) {
+    const next = open === true;
+    if (next === expanded) return;
+    expanded = next;
+    if (next) holdReasons.add("menu");
+    else holdReasons.delete("menu");
+    syncSessionHud(latestSnapshot || getCurrentSnapshot(), {});
+    if (typeof ctx.onQuickStateChanged === "function") ctx.onQuickStateChanged();
+  }
+
+  function isMenuOpen() {
+    return expanded;
+  }
+
+  // 渲染端报告「不能收起」的原因（输入框聚焦、有草稿）。
+  function setHold(reason, held) {
+    if (typeof reason !== "string" || !reason) return;
+    if (held) holdReasons.add(reason);
+    else holdReasons.delete(reason);
+    // 输入框聚焦期间（mac）让出置顶，中文输入法候选窗才浮得出来；
+    // 与权限气泡的 __clawdMacImeEditing 处理同款（见 topmost-runtime）。
+    const inputWin = panel.win;
+    if (reason === "focus" && inputWin && !inputWin.isDestroyed()) {
+      if (held) inputWin.__clawdMacImeEditing = true;
+      else delete inputWin.__clawdMacImeEditing;
+      if (typeof ctx.reapplyMacVisibility === "function") ctx.reapplyMacVisibility();
+    }
+  }
+
+  // 主进程把聊天会话状态投影推过来（effort/权限/忙碌/排队数/目录名）。
+  function pushQuickState(projection) {
+    latestQuickState = projection && typeof projection === "object" ? projection : null;
+    sendQuickState();
+  }
+
+  function sendQuickState() {
+    if (!latestQuickState) return;
+    // 投影很小，用 JSON 比对接近零成本；流式期间每个 delta 都会推状态，
+    // 不去重的话面板会被无意义的重复包刷屏。
+    const json = JSON.stringify(latestQuickState);
+    if (json === lastQuickStateJson) return;
+    lastQuickStateJson = json;
+    const { win, loaded } = panel;
+    if (!win || win.isDestroyed() || !loaded) return;
+    if (!win.webContents || win.webContents.isDestroyed()) return;
+    win.webContents.send("session-hud:quick-state", latestQuickState);
+  }
+
+  function sendI18n() {
+    if (typeof ctx.getI18n !== "function") return;
+    const payload = ctx.getI18n();
+    const { win: panelWin, loaded: panelLoaded } = panel;
+    if (panelWin && !panelWin.isDestroyed() && panelLoaded
+        && panelWin.webContents && !panelWin.webContents.isDestroyed()) {
+      panelWin.webContents.send("session-hud:lang-change", payload);
+    }
+    if (ringWindow && !ringWindow.isDestroyed() && ringDidFinishLoad
+        && ringWindow.webContents && !ringWindow.webContents.isDestroyed()) {
+      ringWindow.webContents.send("quota-ring:lang-change", payload);
+    }
+  }
+
+  function collectRingAvoidRects(blockContentBounds) {
     const rects = [];
-    if (hudContentBounds) rects.push(hudContentBounds);
+    for (const r of Array.isArray(blockContentBounds) ? blockContentBounds : []) {
+      if (r) rects.push(r);
+    }
 
     if (typeof ctx.getPermissionBubbleBounds === "function") {
       try {
@@ -387,7 +444,8 @@ module.exports = function initSessionHud(ctx) {
     return rects;
   }
 
-  function computeExpectedHudContentBounds(snapshot, scale = getTextScale()) {
+  // 面板 + 环的期望布局（同一份几何喂给可见窗口和热区判定，保证一致）。
+  function computeExpectedLayout(scale = getTextScale()) {
     if (!ctx.win || ctx.win.isDestroyed()) return null;
     const petBounds = typeof ctx.getPetWindowBounds === "function" ? ctx.getPetWindowBounds() : null;
     if (!petBounds) return null;
@@ -402,25 +460,18 @@ module.exports = function initSessionHud(ctx) {
     const workArea = typeof ctx.getNearestWorkArea === "function"
       ? ctx.getNearestWorkArea(cx, cy)
       : { x: 0, y: 0, width: 1280, height: 800 };
-    const width = getHudWidth(
-      ctx.sessionHudShowElapsed !== false,
-      ctx.sessionHudShowStateLabels !== false,
-      ctx.sessionHudShowContextUsage !== false
-    );
-    const widthScale = getHudWidthScale(scale);
-    // Must carry the SAME scale the visible HUD was laid out with — an
-    // unscaled expectation makes the auto-hide hot zone smaller than the
-    // real window, so the cursor "leaves" while still visually over it.
-    const hudEnabled = ctx.sessionHudEnabled !== false;
-    const hasSessions = snapshotHasVisibleSessions(snapshot);
-    let contentBounds = null;
-    if (hudEnabled && hasSessions) {
-      const layout = computeHudLayout(snapshot, { showStateLabels: ctx.sessionHudShowStateLabels !== false });
-      const height = computeHudHeight(layout.rowCount);
-      const computed = computeSessionHudBounds({ hitRect, anchorRect, workArea, width, height, scale, widthScale });
-      contentBounds = computed && computed.contentBounds;
-    }
-    const coinCount = countQuotaCoins(snapshot, ctx.sessionHudShowQuota !== false, ctx.quotaRingHiddenProviders);
+    const widthScale = getBlockWidthScale(scale);
+
+    const panelLayout = computeBlockBounds({
+      hitRect, anchorRect, workArea,
+      cardW: QUICK_CARD.width,
+      cardH: expanded ? QUICK_CARD_EXPANDED.height : QUICK_CARD.height,
+      // 展开态以收起态的底边为基准向上长（只向上延伸，不向下撑）
+      baseCardH: QUICK_CARD.height,
+      shell: QUICK_SHELL, prefer: "left", scale, widthScale,
+    });
+
+    const coinCount = countQuotaCoins(latestSnapshot, ctx.sessionHudShowQuota !== false, ctx.quotaRingHiddenProviders);
     const ring = coinCount > 0
       ? ringGeom.computeQuotaRingBounds({
         hitRect,
@@ -428,63 +479,80 @@ module.exports = function initSessionHud(ctx) {
         workArea,
         coinCount,
         scale,
-        avoidRects: collectRingAvoidRects(contentBounds),
+        avoidRects: collectRingAvoidRects([panelLayout && panelLayout.contentBounds]),
       })
       : null;
-    return { hitRect, contentBounds, ringContentBounds: ring && ring.contentBounds };
+    return { hitRect, panel: panelLayout, ringContentBounds: ring && ring.contentBounds };
   }
 
+  function shellScaled(shell, scale) {
+    const s = clampTextScale(scale);
+    return {
+      top: Math.round(shell.top * s),
+      right: Math.round(shell.right * s),
+      bottom: Math.round(shell.bottom * s),
+      left: Math.round(shell.left * s),
+    };
+  }
+
+  // 动作互斥：拖着宠物走 / 右键菜单开着 / mini 形态 → 已揭示的面板立即收。
+  function isRevealBlocked() {
+    if (getMiniMode() || getMiniTransitioning()) return true;
+    if (typeof ctx.isDragLocked === "function" && ctx.isDragLocked()) return true;
+    if (ctx.menuOpen === true) return true;
+    return false;
+  }
+
+  // 只在「已揭示」时被轮询调用，职责是盯收起：指针离开热区 + 宽限期、
+  // 或动作互斥命中。
   function evaluateAutoHideCursorNow({ syncOnChange = true } = {}) {
     if (!isAutoHidePollingNeeded()) {
       stopAutoHidePoll();
       return false;
     }
+    if (!revealed) return false;
     let cursor = null;
     try {
       cursor = screen.getCursorScreenPoint();
     } catch (_err) {
       cursor = null;
     }
-    let inHotZone = false;
+    const scale = getTextScale();
+    const expected = computeExpectedLayout(scale);
+    // 输入框聚焦 / 有草稿（holdReasons）视同在热区内：打字到一半面板不能溜。
+    // 这条判定不依赖光标位置——getCursorScreenPoint 偶发失败时 hold 也要保活。
+    let inHotZone = holdReasons.size > 0;
     if (cursor) {
-      // Single scale resolve for the whole evaluation: expected bounds and
-      // pad must describe the same (scaled) HUD the user actually sees.
-      const scale = getTextScale();
-      const expected = computeExpectedHudContentBounds(latestSnapshot, scale);
       const hotZone = computeAutoHideHotZone({
         petHitRect: expected && expected.hitRect,
-        expectedHudContentBounds: expected && expected.contentBounds,
+        contentBoundsList: [expected && expected.panel && expected.panel.contentBounds],
         expectedRingContentBounds: expected && expected.ringContentBounds,
         pad: Math.round(HOT_ZONE_PAD * scale),
       });
-      inHotZone = pointInHotZone(cursor, hotZone);
+      inHotZone = inHotZone || pointInHotZone(cursor, hotZone);
     }
     const now = Date.now();
+
+    if (isRevealBlocked()) {
+      revealed = false;
+      visibleHoldUntil = 0;
+      if (syncOnChange) syncSessionHud(latestSnapshot, {});
+      return true;
+    }
     const result = evaluateShouldShow({
-      snapshot: latestSnapshot,
-      sessionHudEnabled: ctx.sessionHudEnabled,
+      eligible: baseEligible(latestSnapshot),
       sessionHudPinned: ctx.sessionHudPinned,
-      clickRevealed,
+      revealed,
       inHotZone,
       now,
       visibleHoldUntil,
       hideGraceMs: HIDE_GRACE_MS,
-      petHidden: ctx.petHidden,
-      miniMode: getMiniMode(),
-      miniTransitioning: getMiniTransitioning(),
-      showQuota: ctx.sessionHudShowQuota !== false,
-      hiddenQuotaProviders: ctx.quotaRingHiddenProviders,
     });
     visibleHoldUntil = result.nextHoldUntil;
-    // In revealed state, poll detecting !show means user moved away past grace.
-    // Clear clickRevealed so subsequent ticks stop polling.
-    const wasRevealed = clickRevealed;
-    if (wasRevealed && !result.show && ctx.sessionHudPinned !== true) {
-      clickRevealed = false;
+    if (!result.show) {
+      revealed = false;
       visibleHoldUntil = 0;
-      if (syncOnChange) {
-        syncSessionHud(latestSnapshot, { sendSnapshot: false });
-      }
+      if (syncOnChange) syncSessionHud(latestSnapshot, {});
       return true;
     }
     return false;
@@ -516,16 +584,16 @@ module.exports = function initSessionHud(ctx) {
       clearTimeout(pollTimer);
       pollTimer = null;
     }
-    clickRevealed = false;
+    revealed = false;
     visibleHoldUntil = 0;
   }
 
   function managedWindow(kind) {
-    return kind === "ring" ? ringWindow : hudWindow;
+    return kind === "ring" ? ringWindow : panel.win;
   }
 
   function cancelHiddenDestroy(kind) {
-    const kinds = kind ? [kind] : ["hud", "ring"];
+    const kinds = kind ? [kind] : ["panel", "ring"];
     for (const key of kinds) {
       const timer = hiddenDestroyTimers[key];
       if (!timer) continue;
@@ -535,8 +603,8 @@ module.exports = function initSessionHud(ctx) {
   }
 
   function scheduleHiddenDestroy(kind) {
-    // Reclaiming a hidden HUD/ring renderer is a low-power-idle-mode behavior;
-    // default mode keeps both windows warm so reveals stay instant.
+    // Reclaiming a hidden panel/ring renderer is a low-power-idle-mode behavior;
+    // default mode keeps windows warm so reveals stay instant.
     if (!ctx.lowPowerIdleMode) return;
     const win = managedWindow(kind);
     if (!win || win.isDestroyed() || win.isVisible()) return;
@@ -553,7 +621,7 @@ module.exports = function initSessionHud(ctx) {
 
   // Internal: clear revealed state without syncing. Caller decides next sync.
   function clearReveal() {
-    clickRevealed = false;
+    revealed = false;
     visibleHoldUntil = 0;
     if (pollTimer) {
       clearTimeout(pollTimer);
@@ -561,22 +629,27 @@ module.exports = function initSessionHud(ctx) {
     }
   }
 
-  // Public API: user clicked the pet to reveal HUD.
+  // Public API: 单击桌宠 → 揭示面板（hit-renderer 单击经 IPC 调到这里）。
   function revealFromPet() {
-    // Quota can expire while both overlay windows are hidden and no session
+    // Quota can expire while the overlay windows are hidden and no session
     // event arrives. Re-read before deciding eligibility so a stale cached
     // snapshot cannot resurrect a dead Orbit coin.
     latestSnapshot = getCurrentSnapshot();
     if (!baseEligible(latestSnapshot)) return;
-    if (ctx.sessionHudPinned === true) return;     // pinned already always-show
-    if (clickRevealed) {
+    if (ctx.sessionHudPinned === true) {
+      // pinned 已常显：点一下只当作宽限续命，保证指针移开后按宽限收起前
+      // 还有反悔时间（与历史行为一致）。
+      visibleHoldUntil = Date.now() + HIDE_GRACE_MS;
+      return;
+    }
+    if (revealed) {
       // Already revealed — refresh grace as a click tolerance.
       visibleHoldUntil = Date.now() + HIDE_GRACE_MS;
       return;
     }
-    clickRevealed = true;
+    revealed = true;
     visibleHoldUntil = Date.now() + HIDE_GRACE_MS;  // seed
-    syncSessionHud(latestSnapshot, { sendSnapshot: true });
+    syncSessionHud(latestSnapshot, {});
     startAutoHidePoll();
   }
 
@@ -585,22 +658,23 @@ module.exports = function initSessionHud(ctx) {
   function handlePinnedChanged(next) {
     if (next === true) {
       stopAutoHidePoll();
-      // Pinned now — HUD always shows via shouldShow. Clear any stale reveal.
-      clickRevealed = false;
+      // Pinned now — panel always shows via shouldShow. Clear any stale reveal.
+      revealed = false;
       visibleHoldUntil = 0;
       syncSessionHud(latestSnapshot);
       return;
     }
     // unpin transition — read real window state, NOT shouldShow() (router
     // already mirrored sessionHudPinned=false so shouldShow would return
-    // false and cause the HUD to flash hidden).
-    const wasVisible =
-      (hudWindow && !hudWindow.isDestroyed() && hudWindow.isVisible())
-      || (ringWindow && !ringWindow.isDestroyed() && ringWindow.isVisible());
+    // false and cause the panel to flash hidden).
+    let wasVisible = false;
+    const panelWin = panel.win;
+    if (panelWin && !panelWin.isDestroyed() && panelWin.isVisible()) wasVisible = true;
+    if (ringWindow && !ringWindow.isDestroyed() && ringWindow.isVisible()) wasVisible = true;
     if (wasVisible && baseEligible(latestSnapshot)) {
-      // Seed revealed state so the HUD stays visible until the user moves
+      // Seed revealed state so the panel stays visible until the user moves
       // away (grace period), preserving the on-screen experience.
-      clickRevealed = true;
+      revealed = true;
       visibleHoldUntil = Date.now() + HIDE_GRACE_MS;
       startAutoHidePoll();
       syncSessionHud(latestSnapshot);
@@ -612,32 +686,6 @@ module.exports = function initSessionHud(ctx) {
   function syncAutoHidePollLifecycle() {
     if (isAutoHidePollingNeeded()) startAutoHidePoll();
     else stopAutoHidePoll();
-  }
-
-  function sendSnapshot(snapshot = latestSnapshot) {
-    if (!snapshot || !hudWindow || hudWindow.isDestroyed() || !didFinishLoad) return;
-    if (!hudWindow.webContents || hudWindow.webContents.isDestroyed()) return;
-    hudWindow.webContents.send("session-hud:session-snapshot", {
-      ...snapshot,
-      hudShowStateLabels: ctx.sessionHudShowStateLabels !== false,
-      hudShowElapsed: ctx.sessionHudShowElapsed !== false,
-      hudShowContextUsage: ctx.sessionHudShowContextUsage !== false,
-      hudShowQuota: ctx.sessionHudShowQuota !== false,
-      hudPinned: ctx.sessionHudPinned === true,
-    });
-  }
-
-  function sendI18n() {
-    if (typeof ctx.getI18n !== "function") return;
-    const payload = ctx.getI18n();
-    if (hudWindow && !hudWindow.isDestroyed() && didFinishLoad
-        && hudWindow.webContents && !hudWindow.webContents.isDestroyed()) {
-      hudWindow.webContents.send("session-hud:lang-change", payload);
-    }
-    if (ringWindow && !ringWindow.isDestroyed() && ringDidFinishLoad
-        && ringWindow.webContents && !ringWindow.webContents.isDestroyed()) {
-      ringWindow.webContents.send("quota-ring:lang-change", payload);
-    }
   }
 
   function sendRingSnapshot(snapshot = latestSnapshot, side = ringSide) {
@@ -658,7 +706,7 @@ module.exports = function initSessionHud(ctx) {
     });
   }
 
-  // The quota ring window mirrors the HUD window's chrome (transparent,
+  // The quota ring window mirrors the panel block chrome (transparent,
   // non-focusable, always-on-top panel) — only the preload/page and the
   // snapshot channel differ.
   function ensureQuotaRing() {
@@ -775,26 +823,20 @@ module.exports = function initSessionHud(ctx) {
     });
   }
 
-  function ensureSessionHud() {
-    cancelHiddenDestroy("hud");
-    if (hudWindow && !hudWindow.isDestroyed()) return hudWindow;
+  // 面板窗口：session-hud.html 整块渲染（不带 query，渲染端总是画整张卡片）。
+  function ensurePanel() {
+    cancelHiddenDestroy("panel");
+    if (panel.win && !panel.win.isDestroyed()) return panel.win;
     if (!ctx.win || ctx.win.isDestroyed()) return null;
 
-    didFinishLoad = false;
-    hudFlippedAbove = false;
-    const hudWidth = getHudWidth(
-      ctx.sessionHudShowElapsed !== false,
-      ctx.sessionHudShowStateLabels !== false,
-      ctx.sessionHudShowContextUsage !== false
-    );
-    // Provisional CSS px → DIP size; syncSessionHud() replaces it with the
-    // precise computeSessionHudBounds() result before the window is shown.
+    panel.loaded = false;
     const scale = getTextScale();
-    const widthScale = getHudWidthScale(scale);
-    hudWindow = new BrowserWindow({
+    const widthScale = getBlockWidthScale(scale);
+    const sh = shellScaled(QUICK_SHELL, scale);
+    const win = new BrowserWindow({
       parent: ctx.win,
-      width: computeHudOuterWidth(hudWidth, scale, widthScale),
-      height: scaleHeight(HUD_HEIGHT + HUD_WINDOW_SHELL.top + HUD_WINDOW_SHELL.bottom, scale),
+      width: Math.round(QUICK_CARD.width * widthScale) + sh.left + sh.right,
+      height: scaleHeight(QUICK_CARD.height, scale) + sh.top + sh.bottom,
       show: false,
       frame: false,
       transparent: true,
@@ -805,7 +847,10 @@ module.exports = function initSessionHud(ctx) {
       fullscreenable: false,
       skipTaskbar: true,
       alwaysOnTop: !isMac,
-      focusable: false,
+      // 输入框/下拉都要键盘焦点（点击激活是权限气泡同款先例）；
+      // mac 上 acceptFirstMouse 让第一次点击就落到控件上。
+      focusable: true,
+      ...(isMac ? { acceptFirstMouse: true } : {}),
       hasShadow: false,
       backgroundColor: "#00000000",
       ...(isLinux ? { type: LINUX_WINDOW_TYPE } : {}),
@@ -816,79 +861,219 @@ module.exports = function initSessionHud(ctx) {
         contextIsolation: true,
       },
     });
+    panel.win = win;
+    // 首次显示也要淡入：窗口从全透明开始（setOpacity 不可用的平台上是空操作）。
+    try { win.setOpacity(0); } catch {}
 
-    if (isWin) hudWindow.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
-    if (typeof ctx.guardAlwaysOnTop === "function") ctx.guardAlwaysOnTop(hudWindow);
+    // mac：面板带文本输入，按权限气泡 #626 的先例处理——保 screen-saver 层级
+    // + Electron 跨 Space，但不委托进 SkyLight 私有空间，中文输入法候选窗
+    // 才浮得出来（见 topmost-runtime reapplyMacVisibility 的 __clawdMacTextInputBubble 分支）。
+    if (isMac) win.__clawdMacTextInputBubble = true;
 
-    hudWindow.loadFile(path.join(__dirname, "session-hud.html"));
-    hudWindow.webContents.once("did-finish-load", () => {
-      didFinishLoad = true;
+    if (isWin) win.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
+    if (typeof ctx.guardAlwaysOnTop === "function") ctx.guardAlwaysOnTop(win);
+
+    win.loadFile(path.join(__dirname, "session-hud.html"));
+    win.webContents.once("did-finish-load", () => {
+      panel.loaded = true;
       // Explicit even though same-origin propagation usually covers it — a
       // stale partition-persisted factor must never win over prefs.
-      applyZoomToWindow(hudWindow, getTextScale());
+      applyZoomToWindow(win, getTextScale());
       sendI18n();
+      lastQuickStateJson = null; // 新窗口要完整推一次快捷状态
+      sendQuickState();
       syncSessionHud();
     });
-    hudWindow.on("closed", () => {
-      cancelHiddenDestroy("hud");
-      hudWindow = null;
-      didFinishLoad = false;
-      hudFlippedAbove = false;
-      notifyReservedOffsetIfChanged();
+    win.on("closed", () => {
+      cancelHiddenDestroy("panel");
+      cancelPanelFade();
+      pendingHiddenBounds = null;
+      panel.win = null;
+      panel.loaded = false;
+      // 渲染端随窗口一起没了，再也发不出 setHold(..., false)——残留的 hold
+      // 会把之后所有点击面板永久钉住（低电量回收窗口后尤其明显）。
+      holdReasons.clear();
+      lastQuickStateJson = null;
+      notifyGeometryChanged();
     });
 
-    return hudWindow;
+    return win;
   }
 
-  function hideSessionHud() {
-    hudFlippedAbove = false;
-    if (hudWindow && !hudWindow.isDestroyed()) hudWindow.hide();
-    notifyReservedOffsetIfChanged();
-    scheduleHiddenDestroy("hud");
+  // ── 淡入淡出（整窗透明度）──
+  // setOpacity 在 macOS/Windows 可用，Linux 上是空操作；getOpacity 失败时
+  // 视为 1（不淡入直接显示），所以每个调用点都兜着 try/catch。
+  function setPanelOpacity(win, value) {
+    if (!win || win.isDestroyed()) return;
+    try { win.setOpacity(value); } catch {}
   }
 
-  function computeBounds(snapshot, scale = getTextScale()) {
-    if (!ctx.win || ctx.win.isDestroyed()) return null;
-    const petBounds = typeof ctx.getPetWindowBounds === "function" ? ctx.getPetWindowBounds() : null;
-    if (!petBounds) return null;
-    const hitRect = typeof ctx.getHitRectScreen === "function"
-      ? ctx.getHitRectScreen(petBounds)
-      : null;
-    const anchorRect = typeof ctx.getSessionHudAnchorRect === "function"
-      ? ctx.getSessionHudAnchorRect(petBounds)
-      : null;
-    const cx = petBounds.x + petBounds.width / 2;
-    const cy = petBounds.y + petBounds.height / 2;
-    const workArea = typeof ctx.getNearestWorkArea === "function"
-      ? ctx.getNearestWorkArea(cx, cy)
-      : { x: 0, y: 0, width: 1280, height: 800 };
-    const layout = computeHudLayout(snapshot, { showStateLabels: ctx.sessionHudShowStateLabels !== false });
-    const height = computeHudHeight(layout.rowCount);
-    const width = getHudWidth(
-      ctx.sessionHudShowElapsed !== false,
-      ctx.sessionHudShowStateLabels !== false,
-      ctx.sessionHudShowContextUsage !== false
-    );
-    const widthScale = getHudWidthScale(scale);
-    lastHudHeight = height;
-    return computeSessionHudBounds({ hitRect, anchorRect, workArea, width, height, scale, widthScale });
+  function readPanelOpacity(win) {
+    try { return win.getOpacity(); } catch { return 1; }
   }
 
-  function showSessionHud(win) {
-    if (!win || win.isDestroyed() || !didFinishLoad) return;
-    cancelHiddenDestroy("hud");
+  function cancelPanelFade() {
+    if (panelOpacityTimer) {
+      clearInterval(panelOpacityTimer);
+      panelOpacityTimer = null;
+    }
+  }
+
+  // 淡入：从当前不透明度几帧推到 1。中途被打断的淡出会从中间值接着淡回来。
+  function fadePanelIn(win) {
+    cancelPanelFade();
+    if (!win || win.isDestroyed()) return;
+    const from = readPanelOpacity(win);
+    if (!(from < 1)) {
+      setPanelOpacity(win, 1);
+      return;
+    }
+    const stepMs = Math.max(1, Math.round(PANEL_FADE_MS / PANEL_FADE_STEPS));
+    let i = 0;
+    panelOpacityTimer = setInterval(() => {
+      i += 1;
+      const done = i >= PANEL_FADE_STEPS;
+      setPanelOpacity(win, done ? 1 : from + (1 - from) * (i / PANEL_FADE_STEPS));
+      if (done) {
+        clearInterval(panelOpacityTimer);
+        panelOpacityTimer = null;
+      }
+    }, stepMs);
+  }
+
+  // 淡出：几帧推到 0，之后才真正 hide()——窗口先没了就看不到渐变。
+  function fadePanelOut(win, onHidden) {
+    cancelPanelFade();
+    if (!win || win.isDestroyed()) {
+      onHidden();
+      return;
+    }
+    const from = readPanelOpacity(win);
+    const stepMs = Math.max(1, Math.round(PANEL_FADE_MS / PANEL_FADE_STEPS));
+    let i = 0;
+    panelOpacityTimer = setInterval(() => {
+      i += 1;
+      const done = i >= PANEL_FADE_STEPS;
+      setPanelOpacity(win, done ? 0 : from * (1 - i / PANEL_FADE_STEPS));
+      if (done) {
+        clearInterval(panelOpacityTimer);
+        panelOpacityTimer = null;
+        onHidden();
+      }
+    }, stepMs);
+  }
+
+  // 窗口尺寸变更：变大立即生效（多出来的区域是透明的，卡片慢慢长进去，
+  // 画面本来就在动、看不出来）；变小只记不缩——等窗口隐藏时再应用
+  // （见 hidePanel / applyPendingHiddenBounds）。macOS 合成器在「画面静止
+  // + 窗口缩小」的瞬间偶发亮出一帧错位画面，就是用户看到的闪。
+  function applyPanelBounds(win, bounds) {
+    const current = readPanelBounds(win);
+    const shrinks = !!current && bounds.height < current.height;
+    if (!shrinks) {
+      pendingHiddenBounds = null;
+      win.setBounds(bounds);
+      return;
+    }
+    // 窗口不可见时直接应用：尺寸变化无迹可寻（比如菜单开着时被动作收起，
+    // 下次显示前先在这里缩到位，免得带着多余透明区露出来挡点击）。
+    const visible = typeof win.isVisible === "function" && win.isVisible();
+    if (!visible) {
+      pendingHiddenBounds = null;
+      win.setBounds(bounds);
+      return;
+    }
+    // 可见时只记不缩：始终保存最新的收起布局（期间宠物移动会更新这份目标）。
+    pendingHiddenBounds = bounds;
+  }
+
+  function readPanelBounds(win) {
+    if (!win || win.isDestroyed() || typeof win.getBounds !== "function") return null;
+    try {
+      return win.getBounds();
+    } catch {
+      return null;
+    }
+  }
+
+  // 隐藏时应用待命缩窗：窗口已不可见，尺寸变化不会有任何视觉痕迹。
+  function applyPendingHiddenBounds() {
+    const target = pendingHiddenBounds;
+    pendingHiddenBounds = null;
+    const win = panel.win;
+    if (!target || !win || win.isDestroyed()) return;
+    win.setBounds(target);
+  }
+
+
+  function showPanel() {
+    const win = panel.win;
+    if (!win || win.isDestroyed() || !panel.loaded) return;
+    cancelHiddenDestroy("panel");
     if (!win.isVisible()) {
       win.showInactive();
       keepOutOfTaskbar(win);
       if (isMac) deferMacFloatingVisibility(ctx, win);
       else if (typeof ctx.reapplyMacVisibility === "function") ctx.reapplyMacVisibility();
     }
-    notifyReservedOffsetIfChanged();
+    fadePanelIn(win);
   }
 
-  function syncQuotaRing(snapshot, scale, hudContentBounds, options = {}) {
+  function hidePanel() {
+    // 面板一收，二级菜单必须跟着复位：下次点桌宠应是收起态。否则窗口按
+    // 收起高度算、渲染端还画着展开卡片，内容会被裁掉。
+    if (expanded) {
+      expanded = false;
+      holdReasons.delete("menu");
+      if (typeof ctx.onQuickStateChanged === "function") ctx.onQuickStateChanged();
+    }
+    const win = panel.win;
+    if (!win || win.isDestroyed()) return;
+    if (!win.isVisible()) {
+      // 已经不可见：待命缩窗也无法被看见，直接应用。
+      applyPendingHiddenBounds();
+      scheduleHiddenDestroy("panel");
+      return;
+    }
+    fadePanelOut(win, () => {
+      const current = panel.win;
+      if (!current || current.isDestroyed()) return;
+      current.hide();
+      // 隐藏后应用待命缩窗：收起菜单后窗口一直保持展开尺寸，就等这一刻。
+      applyPendingHiddenBounds();
+      scheduleHiddenDestroy("panel");
+      // 淡出期间窗口还占着避让矩形，真正隐藏后再通知气泡重排一次。
+      notifyGeometryChanged();
+    });
+  }
+
+  // 面板显示/隐藏/移动都会改变气泡要避让的占位：变更后通知气泡重排。
+  function notifyGeometryChanged() {
+    let anyVisible = false;
+    const panelWin = panel.win;
+    if (panelWin && !panelWin.isDestroyed() && panelWin.isVisible()) anyVisible = true;
+    if (ringWindow && !ringWindow.isDestroyed() && ringWindow.isVisible()) anyVisible = true;
+    if (anyVisible === lastAnyVisible) return;
+    lastAnyVisible = anyVisible;
+    if (typeof ctx.onReservedOffsetChange === "function") ctx.onReservedOffsetChange();
+  }
+
+  // 可见面板的窗口矩形（供气泡避让读取；main 侧 getVisibleSessionHudBounds）。
+  function getBlockRects() {
+    const rects = [];
+    const win = panel.win;
+    if (win && !win.isDestroyed() && win.isVisible() && typeof win.getBounds === "function") {
+      try {
+        const bounds = win.getBounds();
+        if (bounds && Number.isFinite(bounds.width) && bounds.width > 0) rects.push(bounds);
+      } catch {}
+    }
+    return rects;
+  }
+
+  function syncQuotaRing(snapshot, scale, blockContentBounds, options = {}) {
     const ring = shouldShow(snapshot)
-      ? computeRingBounds(snapshot, scale, collectRingAvoidRects(hudContentBounds))
+      ? computeRingBounds(snapshot, scale, collectRingAvoidRects(blockContentBounds))
       : null;
     if (!ring) {
       hideQuotaRing();
@@ -902,45 +1087,43 @@ module.exports = function initSessionHud(ctx) {
     // reposition-only sync, or the renderer keeps the stale layout.
     const sideChanged = ring.side !== ringSide;
     ringSide = ring.side;
-    if (options.sendSnapshot !== false || sideChanged) sendRingSnapshot(snapshot, ring.side);
+    if (options.sendRingSnapshot !== false || sideChanged) sendRingSnapshot(snapshot, ring.side);
     showQuotaRing(rwin);
   }
 
   function syncSessionHud(snapshot = latestSnapshot || getCurrentSnapshot(), options = {}) {
     latestSnapshot = snapshot;
-    // Defend against stale reveal: if base eligibility dropped (last session
-    // ended AND quota went away), clear any leftover clickRevealed so a future
-    // new session does not pop the UI without a fresh user click.
+    // Defend against stale reveal: if base eligibility dropped, clear any
+    // leftover revealed so a future eligible state does not pop the UI
+    // without a fresh user click.
     if (!baseEligible(snapshot)) {
       clearReveal();
     }
     syncAutoHidePollLifecycle();
 
     const show = shouldShow(snapshot);
-    // Resolve the scale ONCE per sync and feed the same value to both windows
-    // and the bounds math — separate reads could disagree mid-display-crossing.
+    const panelAllowed = ctx.sessionHudEnabled !== false;
+    // Resolve the scale ONCE per sync and feed the same value to the panel and
+    // the bounds math — separate reads could disagree mid-display-crossing.
     const scale = getTextScale();
 
-    // ── Session HUD (sessions only; gated by its own master, independent of
-    // the quota ring) ──
-    const hudEnabled = ctx.sessionHudEnabled !== false;
-    const hasSessions = snapshotHasVisibleSessions(snapshot);
-    const hudComputed = show && hudEnabled && hasSessions ? computeBounds(snapshot, scale) : null;
-    if (!hudComputed) {
-      hideSessionHud();
+    // ── 面板（整块）──
+    const layout = show && panelAllowed ? computeExpectedLayout(scale) : null;
+    if (!layout || !layout.panel) {
+      hidePanel();
     } else {
-      const win = ensureSessionHud();
+      const win = ensurePanel();
       if (win && !win.isDestroyed()) {
         applyZoomToWindow(win, scale);
-        hudFlippedAbove = !!hudComputed.flippedAbove;
-        win.setBounds(hudComputed.bounds);
-        if (options.sendSnapshot !== false) sendSnapshot(snapshot);
-        showSessionHud(win);
+        applyPanelBounds(win, layout.panel.bounds);
+        showPanel();
       }
     }
 
     // ── Quota ring (quota only; attached beside the pet) ──
-    syncQuotaRing(snapshot, scale, hudComputed ? hudComputed.contentBounds : null, options);
+    syncQuotaRing(snapshot, scale, layout && layout.panel ? [layout.panel.contentBounds] : [], options);
+
+    notifyGeometryChanged();
   }
 
   function broadcastSessionSnapshot(snapshot) {
@@ -948,109 +1131,89 @@ module.exports = function initSessionHud(ctx) {
   }
 
   function repositionSessionHud() {
-    syncSessionHud(latestSnapshot || getCurrentSnapshot(), { sendSnapshot: false });
+    syncSessionHud(latestSnapshot || getCurrentSnapshot(), { sendRingSnapshot: false });
   }
 
   function repositionQuotaRing() {
     const snapshot = latestSnapshot || getCurrentSnapshot();
     const scale = getTextScale();
-    const hudComputed = shouldShow(snapshot)
-      && ctx.sessionHudEnabled !== false
-      && snapshotHasVisibleSessions(snapshot)
-      ? computeBounds(snapshot, scale)
+    const layout = shouldShow(snapshot) && ctx.sessionHudEnabled !== false
+      ? computeExpectedLayout(scale)
       : null;
-    syncQuotaRing(snapshot, scale, hudComputed ? hudComputed.contentBounds : null, {
-      sendSnapshot: false,
-    });
+    syncQuotaRing(snapshot, scale, layout && layout.panel ? [layout.panel.contentBounds] : [], { sendRingSnapshot: false });
   }
 
+  // 历史 API：气泡的「HUD 下方预留」已废除（块在桌宠两侧，气泡改走避让矩形）。
   function getHudReservedOffset() {
-    return readHudReservedOffset();
-  }
-
-  function readHudReservedOffset() {
-    if (!hudWindow || hudWindow.isDestroyed() || !hudWindow.isVisible()) return 0;
-    if (hudFlippedAbove) return 0;
-    // computeHudReservedOffset works in CSS px; consumers (bubble avoidance)
-    // position windows in DIP.
-    return scaleHeight(computeHudReservedOffset(lastHudHeight), getTextScale());
-  }
-
-  function notifyReservedOffsetIfChanged() {
-    const next = readHudReservedOffset();
-    if (next === lastReservedOffset) return;
-    lastReservedOffset = next;
-    if (typeof ctx.onReservedOffsetChange === "function") ctx.onReservedOffsetChange(next);
+    return 0;
   }
 
   function cleanup() {
     stopAutoHidePoll();
     cancelHiddenDestroy();
-    if (hudWindow && !hudWindow.isDestroyed()) hudWindow.destroy();
-    hudWindow = null;
-    didFinishLoad = false;
-    hudFlippedAbove = false;
+    cancelPanelFade();
+    pendingHiddenBounds = null;
+    expanded = false;
+    holdReasons.delete("menu");
+    const win = panel.win;
+    if (win && !win.isDestroyed()) win.destroy();
+    panel.win = null;
+    panel.loaded = false;
     if (ringWindow && !ringWindow.isDestroyed()) ringWindow.destroy();
     ringWindow = null;
     ringDidFinishLoad = false;
-    lastHudHeight = HUD_ROW_HEIGHT;
-    notifyReservedOffsetIfChanged();
   }
 
   return {
-    ensureSessionHud,
     broadcastSessionSnapshot,
     repositionSessionHud,
     repositionQuotaRing,
     syncSessionHud,
     sendI18n,
     getHudReservedOffset,
+    getBlockRects,
     cleanup,
-    getWindow: () => hudWindow,
+    getWindow: () => panel.win,
+    // 面板窗口给 topmost-runtime 做 mac 层级/跨 Space 处理（数组形状保持兼容）。
+    getWindows: () => {
+      const win = panel.win;
+      return win && !win.isDestroyed() ? [win] : [];
+    },
     getQuotaRingWindow: () => ringWindow,
-    // v5 three-state API
+    // 点击揭示状态机
     revealFromPet,
     handlePinnedChanged,
     clearReveal,
+    // 快捷输入面板 API
+    dismissForAction,
+    setHold,
+    setMenuOpen,
+    isMenuOpen,
+    pushQuickState,
+    isPanelOpen,
   };
 };
 
 module.exports.__test = {
-  computeSessionHudBounds,
-  computeHudLayout,
-  getHudMaxExpandedRows,
-  computeHudHeight,
-  countQuotaCoins,
-  computeHudReservedOffset,
-  isHudSession,
-  getHudWidth,
-  getHudWidthScale,
-  computeHudOuterWidth,
+  QUICK_CARD,
+  QUICK_CARD_EXPANDED,
+  QUICK_SHELL,
+  computeBlockBounds,
   evaluateBaseEligible,
   evaluateShouldShow,
+  countQuotaCoins,
+  getBlockWidthScale,
+  rectsIntersect,
   pointInExpandedRect,
   computeAutoHideHotZone,
   pointInHotZone,
   constants: {
-    HUD_WIDTH,
-    HUD_WIDTH_COMPACT,
-    HUD_WIDTH_LABELS,
-    HUD_WIDTH_LABELS_COMPACT,
-    HUD_CONTEXT_USAGE_WIDTH_BUMP,
-    HUD_LABELS_ONLY_WIDTH_TRIM,
-    HUD_HEIGHT,
-    HUD_ROW_HEIGHT,
-    HUD_MAX_EXPANDED_ROWS,
-    HUD_MAX_EXPANDED_ROWS_LABELS,
-    HUD_WINDOW_SHELL,
-    HUD_PET_GAP,
-    BUBBLE_GAP,
+    BLOCK_PET_GAP,
+    BLOCK_WIDTH_GROWTH_RATIO,
     EDGE_MARGIN,
-    HUD_BORDER_Y,
     HOT_ZONE_PAD,
     AUTO_HIDE_POLL_MS,
     HIDE_GRACE_MS,
     HIDDEN_WINDOW_DESTROY_MS,
-    HUD_WIDTH_GROWTH_RATIO,
   },
 };

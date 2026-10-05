@@ -78,6 +78,12 @@ function createTopmostRuntime(options = {}) {
   ));
   const getUpdateBubbleWindow = options.getUpdateBubbleWindow || (() => null);
   const getSessionHudWindow = options.getSessionHudWindow || (() => null);
+  // 快捷面板窗口（数组形状，当前是一块；保留循环以容纳将来可能的拆分）：
+  // 每块都要拿到同样的 mac 层级/跨 Space 处理。未接线时回退为单窗口。
+  const getSessionHudWindows = options.getSessionHudWindows || (() => {
+    const win = getSessionHudWindow();
+    return win ? [win] : [];
+  });
   const getQuotaRingWindow = options.getQuotaRingWindow || (() => null);
   const getContextMenuOwner = options.getContextMenuOwner || (() => null);
   const getNearestWorkArea = options.getNearestWorkArea || (() => null);
@@ -299,7 +305,9 @@ function createTopmostRuntime(options = {}) {
       apply(bubble);
     }
     apply(getUpdateBubbleWindow());
-    apply(getSessionHudWindow());
+    for (const panelBlock of getSessionHudWindows()) {
+      apply(panelBlock);
+    }
     apply(getQuotaRingWindow());
     apply(getContextMenuOwner());
     syncImeEditingPetDodge();
@@ -572,9 +580,10 @@ function createTopmostRuntime(options = {}) {
         reassertWindowAndTaskbar(updateBubbleWin);
       }
 
-      const sessionHudWin = getSessionHudWindow();
-      if (isLiveWindow(sessionHudWin) && sessionHudWin.isVisible()) {
-        reassertWindowAndTaskbar(sessionHudWin);
+      for (const panelBlock of getSessionHudWindows()) {
+        if (isLiveWindow(panelBlock) && panelBlock.isVisible()) {
+          reassertWindowAndTaskbar(panelBlock);
+        }
       }
 
       const quotaRingWin = getQuotaRingWindow();

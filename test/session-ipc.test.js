@@ -48,6 +48,13 @@ class FakeIpcMain {
     assert.strictEqual(typeof listener, "function", `missing IPC listener ${channel}`);
     return listener({ sender: "sender-web-contents" }, ...args);
   }
+
+  // 指定 event 的 fire-and-forget 调用（信任闸门要用到）。
+  sendFrom(event, channel, ...args) {
+    const listener = this.listeners.get(channel);
+    assert.strictEqual(typeof listener, "function", `missing IPC listener ${channel}`);
+    return listener(event, ...args);
+  }
 }
 
 function createHarness(overrides = {}) {
@@ -62,6 +69,34 @@ function createHarness(overrides = {}) {
     mainFrame: dashboardMainFrame,
     isDestroyed: () => false,
   };
+  // 悬停快捷面板（session-hud.html）的信任锚点，与 Dashboard 同一形状：
+  // 只认自家 HUD 窗口的主 frame + 精确的本地页面 URL。
+  const hudMainFrame = {
+    url: pathToFileURL(path.join(__dirname, "..", "src", "session-hud.html")).toString(),
+  };
+  const hudWebContents = {
+    mainFrame: hudMainFrame,
+    isDestroyed: () => false,
+  };
+  // 快捷面板的能力注入缝：默认记账进 calls；quickDeps:false 模拟未接线形态。
+  const quickDeps = overrides.quickDeps === false
+    ? {}
+    : {
+        quickSendPrompt: overrides.quickSendPrompt
+          || ((text) => { calls.push(["quickSendPrompt", text]); return { status: "ok" }; }),
+        quickSetEffort: overrides.quickSetEffort
+          || ((value) => { calls.push(["quickSetEffort", value]); return { status: "ok" }; }),
+        quickSetPermissionMode: overrides.quickSetPermissionMode
+          || ((value) => { calls.push(["quickSetPermissionMode", value]); return { status: "ok" }; }),
+        quickPickWorkingDir: overrides.quickPickWorkingDir
+          || (() => { calls.push(["quickPickWorkingDir"]); return { status: "ok" }; }),
+        quickStopChat: overrides.quickStopChat
+          || (() => { calls.push(["quickStopChat"]); return { status: "ok" }; }),
+        quickSetHold: overrides.quickSetHold
+          || ((reason, held) => { calls.push(["quickSetHold", reason, held]); }),
+        quickSetMenuOpen: overrides.quickSetMenuOpen
+          || ((open) => { calls.push(["quickSetMenuOpen", open]); return { status: "ok" }; }),
+      };
   // A supported-platform quick mode by default, so the shared channel set
   // reflects a darwin/win32 install.
   const quickMode = {
@@ -136,6 +171,8 @@ function createHarness(overrides = {}) {
       calls.push(["refreshKimiQuota"]);
       return { status: "ok" };
     }),
+    getSessionHudWebContents: overrides.getSessionHudWebContents || (() => hudWebContents),
+    ...quickDeps,
   });
   return {
     ipcMain,
@@ -145,6 +182,12 @@ function createHarness(overrides = {}) {
       sender: dashboardWebContents,
       senderFrame: dashboardMainFrame,
     },
+    trustedHudEvent: {
+      sender: hudWebContents,
+      senderFrame: hudMainFrame,
+    },
+    hudWebContents,
+    hudMainFrame,
   };
 }
 
@@ -169,14 +212,17 @@ test("session IPC registers owned channels and disposes them", () => {
     "dashboard:set-session-alias",
     "dashboard:set-session-automation",
     "session-hud:get-i18n",
-    "session-hud:open-session-folder",
+    "session-hud:pick-working-dir",
+    "session-hud:send-prompt",
+    "session-hud:set-effort",
+    "session-hud:set-menu-open",
+    "session-hud:set-permission-mode",
+    "session-hud:stop-chat",
     "session:ack-completion",
   ]);
   assert.deepStrictEqual([...ipcMain.listeners.keys()].sort(), [
     "dashboard:focus-session",
-    "session-hud:focus-session",
-    "session-hud:open-dashboard",
-    "session-hud:set-pinned",
+    "session-hud:set-hold",
     "settings:open-dashboard",
     "show-dashboard",
   ]);
@@ -252,9 +298,6 @@ test("session IPC delegates dashboard and HUD behavior", async () => {
     translations: { title: "Sessions" },
   });
   ipcMain.send("dashboard:focus-session", "dash-session");
-  ipcMain.send("session-hud:focus-session", "hud-session");
-  ipcMain.send("session-hud:set-pinned", true);
-  ipcMain.send("session-hud:set-pinned", 0);
   assert.deepStrictEqual(await ipcMain.invoke("dashboard:hide-session", "hidden-session"), {
     status: "ok",
     hidden: "hidden-session",
@@ -267,30 +310,20 @@ test("session IPC delegates dashboard and HUD behavior", async () => {
     await ipcMain.invoke("dashboard:open-session-folder", "folder-session"),
     { status: "ok" }
   );
-  assert.deepStrictEqual(
-    await ipcMain.invoke("session-hud:open-session-folder", "hud-folder-session"),
-    { status: "ok" }
-  );
 
   assert.deepStrictEqual(calls, [
     ["focusSession", "dash-session", { requestSource: "dashboard" }],
-    ["focusSession", "hud-session", { requestSource: "hud" }],
-    ["setSessionHudPinned", true],
-    ["setSessionHudPinned", false],
     ["hideSession", "hidden-session"],
     ["setSessionAlias", { sessionId: "s1", alias: "Frontend" }],
     ["openSessionFolder", "folder-session"],
-    ["openSessionFolder", "hud-folder-session"],
   ]);
 });
 
-test("dashboard and HUD open-folder IPC accept only a sessionId string", async () => {
+test("dashboard open-folder IPC accepts only a sessionId string", async () => {
   const { ipcMain, calls } = createHarness();
-  for (const channel of ["dashboard:open-session-folder", "session-hud:open-session-folder"]) {
-    for (const bad of [null, undefined, "", 42, { sessionId: "s1", cwd: "/tmp" }]) {
-      const result = await ipcMain.invoke(channel, bad);
-      assert.strictEqual(result.status, "error");
-    }
+  for (const bad of [null, undefined, "", 42, { sessionId: "s1", cwd: "/tmp" }]) {
+    const result = await ipcMain.invoke("dashboard:open-session-folder", bad);
+    assert.strictEqual(result.status, "error");
   }
   assert.deepStrictEqual(calls, []);
 });
@@ -399,12 +432,10 @@ test("resume-session takes exactly an agentId/opaque-historyKey pair", async () 
 test("session IPC owns dashboard open bridges", () => {
   const { ipcMain, calls } = createHarness();
 
-  ipcMain.send("session-hud:open-dashboard");
   ipcMain.send("settings:open-dashboard");
   ipcMain.send("show-dashboard");
 
   assert.deepStrictEqual(calls, [
-    ["showDashboard", { source: "hud" }],
     ["showDashboard", { source: "settings" }],
     ["showDashboard", undefined],
   ]);
@@ -578,3 +609,233 @@ test("main forwards dashboard open source options into session IPC", () => {
     "main.js should preserve dashboard open options when wiring session IPC"
   );
 });
+
+// ── 悬停快捷面板（阶段一）：发消息 / 切 effort / 切权限模式 / 选目录 / 停止 / 保持显示 ──
+//
+// 这些通道会花钱（send-prompt）或重置会话上下文（set-effort / set-permission-mode /
+// pick-working-dir），信任闸门与载荷校验都必须挡在 owner 之前。
+
+test("快捷面板通道只认 HUD 主 frame，伪造 sender 一律 untrusted-hud-sender", async () => {
+  const { ipcMain, calls, trustedHudEvent, hudWebContents, hudMainFrame } = createHarness();
+
+  // 先用合法 sender 走通一条，证明通道本身接线正常。
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:send-prompt", { text: "hi" }),
+    { status: "ok" }
+  );
+  assert.deepStrictEqual(calls, [["quickSendPrompt", "hi"]]);
+  calls.length = 0;
+
+  // 合法请求形状（非法载荷另有校验分支，不能拿来测闸门）。
+  const wellFormed = [
+    ["session-hud:send-prompt", { text: "hi" }],
+    ["session-hud:set-effort", { value: "high" }],
+    ["session-hud:set-permission-mode", { value: "plan" }],
+    ["session-hud:pick-working-dir", undefined],
+    ["session-hud:stop-chat", undefined],
+  ];
+
+  const forgedEvents = [
+    // 别的 webContents 冒充（frame 形状再像也不行）。
+    { sender: {}, senderFrame: hudMainFrame },
+    // 缺 senderFrame。
+    { sender: hudWebContents },
+    { sender: hudWebContents, senderFrame: null },
+    // 另一个 frame 对象：URL 相同也不行，身份必须是 mainFrame 本体。
+    { sender: hudWebContents, senderFrame: { ...hudMainFrame } },
+  ];
+  for (const event of forgedEvents) {
+    for (const [channel, arg] of wellFormed) {
+      assert.deepStrictEqual(
+        await ipcMain.invokeFrom(event, channel, arg),
+        { status: "error", reason: "untrusted-hud-sender" },
+        channel
+      );
+    }
+    // set-hold 是 fire-and-forget：伪造 sender 只能什么都不触发。
+    ipcMain.sendFrom(event, "session-hud:set-hold", { reason: "focus", held: true });
+  }
+
+  // 同一个 mainFrame 被导航走之后（URL 不再是 session-hud.html）也必须拒绝。
+  const trustedUrl = hudMainFrame.url;
+  hudMainFrame.url = pathToFileURL(path.join(__dirname, "..", "src", "dashboard.html")).toString();
+  try {
+    const navigated = { sender: hudWebContents, senderFrame: hudMainFrame };
+    for (const [channel, arg] of wellFormed) {
+      assert.deepStrictEqual(
+        await ipcMain.invokeFrom(navigated, channel, arg),
+        { status: "error", reason: "untrusted-hud-sender" },
+        channel
+      );
+    }
+    ipcMain.sendFrom(navigated, "session-hud:set-hold", { reason: "focus", held: true });
+  } finally {
+    hudMainFrame.url = trustedUrl;
+  }
+
+  assert.deepStrictEqual(calls, [], "伪造 sender 一律不得触达 owner");
+});
+
+test("send-prompt 的文本闸门：空文本与超长文本拦在 owner 之前", async () => {
+  const { ipcMain, calls, trustedHudEvent } = createHarness();
+
+  for (const bad of [undefined, null, "", "   ", 42, {}, { text: "" }, { text: " \n\t" }, { text: 42 }]) {
+    const result = await ipcMain.invokeFrom(trustedHudEvent, "session-hud:send-prompt", bad);
+    assert.strictEqual(result.status, "error", `必须拒绝载荷 ${JSON.stringify(bad)}`);
+    assert.match(result.message, /empty prompt/);
+  }
+  // 契约上限 100000 字符：100001 拒绝。
+  const tooLong = await ipcMain.invokeFrom(
+    trustedHudEvent,
+    "session-hud:send-prompt",
+    { text: "a".repeat(100001) }
+  );
+  assert.strictEqual(tooLong.status, "error");
+  assert.match(tooLong.message, /prompt too long/);
+  assert.deepStrictEqual(calls, [], "被拦下的文本不得触达 owner");
+
+  // 边界：正好 100000 字符放行（契约：≤100000）。
+  const edge = "a".repeat(100000);
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:send-prompt", { text: edge }),
+    { status: "ok" }
+  );
+  assert.deepStrictEqual(calls, [["quickSendPrompt", edge]]);
+});
+
+test("set-effort / set-permission-mode 只接受契约枚举值", async () => {
+  const { ipcMain, calls, trustedHudEvent } = createHarness();
+
+  for (const bad of [undefined, null, 42, "wild", {}, { value: "WILD" }, { value: 42 }]) {
+    const result = await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-effort", bad);
+    assert.strictEqual(result.status, "error", `set-effort 必须拒绝 ${JSON.stringify(bad)}`);
+    assert.match(result.message, /invalid effort/);
+  }
+  for (const value of ["low", "medium", "high", "xhigh", "max"]) {
+    assert.deepStrictEqual(
+      await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-effort", { value }),
+      { status: "ok" },
+      value
+    );
+    assert.deepStrictEqual(calls.at(-1), ["quickSetEffort", value]);
+  }
+
+  for (const bad of [undefined, null, 42, "yolo", {}, { value: "Auto" }, { value: 42 }]) {
+    const result = await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-permission-mode", bad);
+    assert.strictEqual(result.status, "error", `set-permission-mode 必须拒绝 ${JSON.stringify(bad)}`);
+    assert.match(result.message, /invalid permission mode/);
+  }
+  for (const value of ["default", "acceptEdits", "plan", "auto"]) {
+    assert.deepStrictEqual(
+      await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-permission-mode", { value }),
+      { status: "ok" },
+      value
+    );
+    assert.deepStrictEqual(calls.at(-1), ["quickSetPermissionMode", value]);
+  }
+
+  // 非法值全部拦下之后，只有合法枚举触达过 owner。
+  assert.strictEqual(
+    calls.filter(([name]) => name === "quickSetEffort").length,
+    5
+  );
+  assert.strictEqual(
+    calls.filter(([name]) => name === "quickSetPermissionMode").length,
+    4
+  );
+});
+
+test("set-hold 把 reason/held 交给 quickSetHold，空 reason 与伪造 sender 不触发", async () => {
+  const { ipcMain, calls, trustedHudEvent, hudWebContents, hudMainFrame } = createHarness();
+
+  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-hold", { reason: "focus", held: true });
+  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-hold", { reason: "draft", held: 0 });
+  assert.deepStrictEqual(calls, [
+    ["quickSetHold", "focus", true],
+    ["quickSetHold", "draft", false],
+  ]);
+
+  // 没有 reason 的载荷不触发（held 永远布尔化）。
+  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-hold", { reason: "", held: true });
+  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-hold", { held: true });
+  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-hold", "focus");
+  assert.strictEqual(calls.length, 2);
+
+  // 伪造 sender 不触发。
+  ipcMain.sendFrom({ sender: {}, senderFrame: hudMainFrame }, "session-hud:set-hold", {
+    reason: "focus",
+    held: true,
+  });
+  ipcMain.sendFrom({ sender: hudWebContents, senderFrame: { ...hudMainFrame } }, "session-hud:set-hold", {
+    reason: "focus",
+    held: true,
+  });
+  assert.strictEqual(calls.length, 2);
+});
+
+test("set-menu-open 只收布尔载荷，展开/收起都走 quickSetMenuOpen", async () => {
+  const { ipcMain, calls, trustedHudEvent, hudMainFrame } = createHarness();
+
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-menu-open", { open: true }),
+    { status: "ok" }
+  );
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-menu-open", { open: false }),
+    { status: "ok" }
+  );
+  // 非布尔载荷一律当 false：菜单状态不能被"真值串"之类的值点亮。
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-menu-open", { open: "yes" }),
+    { status: "ok" }
+  );
+  assert.deepStrictEqual(calls, [
+    ["quickSetMenuOpen", true],
+    ["quickSetMenuOpen", false],
+    ["quickSetMenuOpen", false],
+  ]);
+  calls.length = 0;
+
+  // 伪造 sender 不生效（与其它 HUD 通道同一道闸门）。
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(
+      { sender: {}, senderFrame: hudMainFrame },
+      "session-hud:set-menu-open",
+      { open: true }
+    ),
+    { status: "error", reason: "untrusted-hud-sender" }
+  );
+  assert.deepStrictEqual(calls, []);
+});
+
+test("quick* 依赖未注入时 pick-working-dir / stop-chat 回 quick-panel-unavailable", async () => {
+  const { ipcMain, calls, trustedHudEvent } = createHarness({ quickDeps: false });
+
+  for (const channel of ["session-hud:pick-working-dir", "session-hud:stop-chat"]) {
+    assert.deepStrictEqual(
+      await ipcMain.invokeFrom(trustedHudEvent, channel),
+      { status: "error", reason: "quick-panel-unavailable" },
+      channel
+    );
+  }
+  assert.deepStrictEqual(calls, []);
+});
+
+test(
+  "quick* 依赖未注入时 send-prompt / set-effort / set-permission-mode 同样回 quick-panel-unavailable",
+  async () => {
+    const { ipcMain, calls, trustedHudEvent } = createHarness({ quickDeps: false });
+    for (const [channel, arg] of [
+      ["session-hud:send-prompt", { text: "hi" }],
+      ["session-hud:set-effort", { value: "high" }],
+      ["session-hud:set-permission-mode", { value: "plan" }],
+    ]) {
+      assert.deepStrictEqual(
+        await ipcMain.invokeFrom(trustedHudEvent, channel, arg),
+        { status: "error", reason: "quick-panel-unavailable" },
+        channel
+      );
+    }
+    assert.deepStrictEqual(calls, []);
+  }
+);

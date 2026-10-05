@@ -1080,6 +1080,51 @@ describe("roam pauses during IME editing (#640)", () => {
       "no further movement after the editing gate cancels the walk",
     );
   });
+
+  it("does not start a roam while the quick panel is open", () => {
+    const ctx = makeCtx({ isQuickPanelOpen: () => true });
+    const roam = roamModule(ctx);
+    roam.setEnabled(true);
+
+    roam.tick();
+    mock.timers.tick(8000);
+    mock.timers.tick(200);
+
+    assert.equal(ctx._realBounds.x, 400, "pet must hold still while the panel is open");
+    assert.equal(ctx._realBounds.y, 300, "pet must hold still while the panel is open");
+    assert.equal(ctx._stateLog.length, 0, "no roam state change while the panel is open");
+  });
+
+  it("cancels a roam mid-walk when the quick panel opens and restores idle", () => {
+    let panelOpen = false;
+    const ctx = makeCtx({ isQuickPanelOpen: () => panelOpen });
+    const roam = roamModule(ctx);
+    roam.setEnabled(true);
+
+    roam.tick();
+    mock.timers.tick(8000); // pause timer fires, walk starts
+    mock.timers.tick(160); // a few frames in
+    const midWalk = { x: ctx._realBounds.x, y: ctx._realBounds.y };
+    assert.ok(
+      midWalk.x !== 400 || midWalk.y !== 300,
+      "walk should be underway",
+    );
+
+    panelOpen = true; // 用户点开面板
+    mock.timers.tick(64); // next frame hits the gate
+
+    assert.ok(
+      ctx._stateLog.some((e) => e.type === "setState" && e.state === "idle"),
+      "gate with no incoming state must restore idle instead of freezing the walk pose",
+    );
+    const stopped = { x: ctx._realBounds.x, y: ctx._realBounds.y };
+    mock.timers.tick(320);
+    assert.deepEqual(
+      { x: ctx._realBounds.x, y: ctx._realBounds.y },
+      stopped,
+      "no further movement after the quick-panel gate cancels the walk",
+    );
+  });
 });
 
 describe("roam pauses during settings size preview", () => {

@@ -94,6 +94,8 @@ const { registerSettingsIpc } = require("./settings-ipc");
 const createChatWindowRuntime = require("./chat-window");
 const { registerChatIpc } = require("./chat-ipc");
 const { createChatSessionRuntime } = require("./chat-session-runtime");
+// 悬停面板输入框的排队（忙时排队、无目录阻塞、停止/换上下文清空）。
+const createChatPromptQueue = require("./chat-prompt-queue");
 // 内置对话「历史会话 / 续聊」（阶段二）：与 Dashboard 共用同一份历史存储读取；
 // 回填消息按同样的目录编码规则定位记录文件并读尾部（chat-transcript-backfill）。
 const {
@@ -715,6 +717,17 @@ function getDashboardI18nPayload() {
   return { lang, translations: { ...dict } };
 }
 
+// 悬停面板的 i18n：dashboard 字典 + 内置对话字典（chat-i18n 的 effort /
+// 权限模式等键）。面板 footer 与会话 HUD 共用一份载荷（session-hud:get-i18n）。
+// chat-i18n 是 IIFE + globalThis 风格（与 settings-i18n 同款），require 即挂载。
+require("./chat-i18n");
+function getHudI18nPayload() {
+  const base = getDashboardI18nPayload();
+  const chatStrings = (globalThis.ClawdChatI18n && globalThis.ClawdChatI18n.STRINGS) || {};
+  const chat = chatStrings[base.lang] || chatStrings.en || {};
+  return { lang: base.lang, translations: { ...base.translations, ...chat } };
+}
+
 // First-run import of system-backed settings into prefs. The actual truth for
 // `openAtLogin` lives in OS login items / autostart files; if we just trusted
 // the schema default (false), an upgrading user with login-startup already
@@ -927,13 +940,22 @@ function getChatWindow() {
   return chatWindowRuntime ? chatWindowRuntime.getWindow() : null;
 }
 
-// 首开引导：还没有工作目录时弹一次目录选择（取消则维持空目录，渲染端会
-// 禁用输入并显示「请先选择工作目录」）。选择结果与点目录按钮走同一份
-// prefs（chatLastWorkingDir）和 runtime.setWorkingDir。
-async function promptChatWorkingDirIfMissing() {
-  let cwd = null;
-  try { cwd = chatRuntime.getState().cwd; } catch {}
-  if (cwd) return;
+// 换上下文（用户点停止 / 新会话 / 恢复 / 换目录）时清空快捷输入队列。
+// 「首次选定工作目录」是例外：可能正有 blocked:"no-cwd" 的消息等着这一刻
+// 放行，清了就等于把用户的话丢了——所以按「之前有没有目录」区分。
+function clearQueueForContextReset(reason) {
+  if (!chatPromptQueue) return;
+  if (reason === "dir-changed") {
+    let hadCwd = false;
+    try { hadCwd = !!chatRuntime.getState().cwd; } catch {}
+    if (!hadCwd) return; // 首选目录：留队，等 cwd 边沿自动放行
+  }
+  chatPromptQueue.clear(reason);
+}
+
+// 选择工作目录（聊天窗口引导 / 目录按钮 / 悬停面板的文件夹按钮共用一份流程）：
+// prefs（chatLastWorkingDir）+ runtime.setWorkingDir（会重置会话上下文）。
+async function pickChatWorkingDir() {
   const parent = getChatWindow();
   const dialogOptions = { properties: ["openDirectory", "createDirectory"] };
   let result;
@@ -943,12 +965,12 @@ async function promptChatWorkingDirIfMissing() {
       : await dialog.showOpenDialog(dialogOptions);
   } catch (err) {
     console.warn("Clawd: chat working dir dialog failed:", err && err.message);
-    return;
+    return { status: "error", message: err && err.message };
   }
   const picked = result && !result.canceled && Array.isArray(result.filePaths)
     ? result.filePaths[0]
     : null;
-  if (!picked) return;
+  if (!picked) return { status: "canceled" };
   // prefs 校验失败只告警，不挡住本次会话使用该目录（与 chat-ipc 的选择流程一致）。
   try {
     const applyResult = _settingsController.applyUpdate("chatLastWorkingDir", picked);
@@ -958,9 +980,26 @@ async function promptChatWorkingDirIfMissing() {
   } catch (err) {
     console.warn("Clawd: failed to persist chatLastWorkingDir:", err && err.message);
   }
+  // 重选同一目录不算「换目录」（setWorkingDir 对同目录是 no-op、不重置上下文），
+  // 不能把排队消息误清掉。
+  let currentCwd = null;
+  try { currentCwd = chatRuntime.getState().cwd; } catch {}
+  if (picked !== currentCwd) clearQueueForContextReset("dir-changed");
   try { await chatRuntime.setWorkingDir(picked); } catch (err) {
     console.warn("Clawd: chat setWorkingDir failed:", err && err.message);
+    return { status: "error", message: err && err.message };
   }
+  pushQuickChatState();
+  return { status: "ok", path: picked };
+}
+
+// 首开引导：还没有工作目录时弹一次目录选择（取消则维持空目录，渲染端会
+// 禁用输入并显示「请先选择工作目录」）。
+async function promptChatWorkingDirIfMissing() {
+  let cwd = null;
+  try { cwd = chatRuntime.getState().cwd; } catch {}
+  if (cwd) return;
+  await pickChatWorkingDir();
 }
 
 chatWindowRuntime = createChatWindowRuntime({
@@ -980,7 +1019,11 @@ chatWindowRuntime = createChatWindowRuntime({
   // 关窗即停掉当前会话（interrupt 当前回合并释放 driver）；SDK 子进程留到
   // 应用退出时由 chatRuntime.dispose() 统一清掉（见 before-quit）。
   // 退出流程里 dispose 先于关窗发生，这里的 stop 兜底吞异常（幂等）。
-  onAfterClosed: () => { try { chatRuntime.stop(); } catch {} },
+  // 先清排队再 stop：stop 回 idle 的边沿不能把排队消息发进已关的窗口会话。
+  onAfterClosed: () => {
+    clearQueueForContextReset("closed");
+    try { chatRuntime.stop(); } catch {}
+  },
 });
 
 // ── 内置对话：历史会话 / 续聊（阶段二）的主进程依赖 ──
@@ -1027,18 +1070,63 @@ function loadChatBackfill(sessionId) {
   return [];
 }
 
+// 悬停面板的快捷输入排队（定义在 runtime 之前，onUpdate 扇出会用到）。
+let chatPromptQueue = null;
+
+// 快捷输入面板的状态投影：聊天会话的运行状态 + 队列计数 + 工作目录名。
+// 变化检测在 session-hud.pushQuickState 里做（JSON 比对）。
+function buildQuickChatState(state) {
+  const snap = chatPromptQueue ? chatPromptQueue.getSnapshot() : { count: 0, blocked: null };
+  return {
+    effort: state && state.effort,
+    permissionMode: state && state.permissionMode,
+    status: (state && state.status) || "idle",
+    busy: !!(state && state.busy),
+    queuedCount: snap.count,
+    blocked: snap.blocked,
+    hasCwd: !!(state && state.cwd),
+    cwdName: state && state.cwd ? path.basename(state.cwd) : null,
+    // 二级设置菜单的展开状态（状态源在 session-hud，这里只是转发给渲染端）。
+    menuOpen: getSessionHudMenuOpen(),
+  };
+}
+
+function pushQuickChatState() {
+  if (!_sessionHud || typeof _sessionHud.pushQuickState !== "function") return;
+  let state = null;
+  try { state = chatRuntime.getState(); } catch {}
+  if (state) _sessionHud.pushQuickState(buildQuickChatState(state));
+}
+
 const chatRuntime = createChatSessionRuntime({
   settingsController: _settingsController,
   findClaudeCmd,
   // 权限确认走桌宠气泡：不注入 canUseTool，Claude Code 的 PermissionRequest
   // hook 会打到应用自己的 /permission 路由（见 server-route-permission.js），
   // 用户点气泡即完成决策。
-  // 经 chat-ipc 的 pushUpdate 推送（它会附带 lang 供渲染端 i18n 使用）。
+  // 经 chat-ipc 的 pushUpdate 推送（它会附带 lang 供渲染端 i18n 使用）；
+  // 同一状态再扇给排队器（忙→闲边沿放行下一条）与悬停面板（状态投影）。
   onUpdate: (state) => {
     if (chatIpcRuntime) chatIpcRuntime.pushUpdate(state);
+    if (chatPromptQueue) chatPromptQueue.handleRuntimeState(state);
+    if (_sessionHud && typeof _sessionHud.pushQuickState === "function") {
+      _sessionHud.pushQuickState(buildQuickChatState(state));
+    }
   },
   // 恢复历史会话前回填消息（阶段二）；chat-ipc 也会随 resumeSession 参数转交同一函数。
   loadBackfill: loadChatBackfill,
+});
+
+chatPromptQueue = createChatPromptQueue({
+  send: (text) => chatRuntime.send(text),
+  isBusy: () => {
+    try { return chatRuntime.getState().busy === true; } catch { return false; }
+  },
+  hasCwd: () => {
+    try { return !!chatRuntime.getState().cwd; } catch { return false; }
+  },
+  // 队列计数变化（排队/发出/清空）也要刷给面板。
+  onChanged: () => pushQuickChatState(),
 });
 
 const permissionAutomationConfirmationRuntime = createPermissionAutomationConfirmationRuntime({
@@ -2051,32 +2139,27 @@ let broadcastSessionHudSnapshot = () => {};
 let sendSessionHudI18n = () => {};
 let getSessionHudReservedOffset = () => 0;
 let getSessionHudWindow = () => null;
+let getSessionHudWindows = () => [];
 let getQuotaRingWindow = () => null;
 
+// 快捷面板的可见矩形，供权限气泡/更新气泡避让（赋值发生在 _sessionHud
+// 创建之后，在此之前读到空数组是安全的）。
+let getSessionHudBlockRects = () => [];
+// 面板二级设置菜单的展开状态（状态源在 session-hud；同样延迟赋值）。
+let getSessionHudMenuOpen = () => false;
 function getVisibleSessionHudBounds() {
   try {
-    const hudWindow = getSessionHudWindow();
-    if (
-      !hudWindow
-      || (typeof hudWindow.isDestroyed === "function" && hudWindow.isDestroyed())
-      || (typeof hudWindow.isVisible === "function" && !hudWindow.isVisible())
-      || typeof hudWindow.getBounds !== "function"
-    ) {
-      return [];
-    }
-    const bounds = hudWindow.getBounds();
-    if (
-      !bounds
-      || !Number.isFinite(bounds.x)
-      || !Number.isFinite(bounds.y)
-      || !Number.isFinite(bounds.width)
-      || bounds.width <= 0
-      || !Number.isFinite(bounds.height)
-      || bounds.height <= 0
-    ) {
-      return [];
-    }
-    return [{ x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }];
+    const rects = getSessionHudBlockRects();
+    if (!Array.isArray(rects)) return [];
+    return rects.filter((bounds) => (
+      bounds
+      && Number.isFinite(bounds.x)
+      && Number.isFinite(bounds.y)
+      && Number.isFinite(bounds.width)
+      && bounds.width > 0
+      && Number.isFinite(bounds.height)
+      && bounds.height > 0
+    ));
   } catch {
     return [];
   }
@@ -2141,6 +2224,8 @@ const topmostRuntime = createTopmostRuntime({
   ),
   getUpdateBubbleWindow: () => _updateBubble.getBubbleWindow(),
   getSessionHudWindow: () => getSessionHudWindow(),
+  // 快捷面板两块窗口都要走同款 mac 层级/跨 Space 处理（见 topmost-runtime）。
+  getSessionHudWindows: () => getSessionHudWindows(),
   getQuotaRingWindow: () => getQuotaRingWindow(),
   getContextMenuOwner: () => contextMenuOwner,
   getNearestWorkArea,
@@ -3041,8 +3126,11 @@ const _sessionHud = require("./session-hud")({
   get lowPowerIdleMode() { return lowPowerIdleMode; },
   getMiniMode: () => _mini.getMiniMode(),
   getMiniTransitioning: () => _mini.getMiniTransitioning(),
+  // 悬停揭示的互斥：拖着宠物走 / 右键菜单开着时不揭示（session-hud 轮询读取）。
+  isDragLocked: () => petWindowRuntime.isDragLocked(),
+  get menuOpen() { return menuOpen; },
   getSessionSnapshot: () => _state.buildSessionSnapshot(),
-  getI18n: () => getDashboardI18nPayload(),
+  getI18n: () => getHudI18nPayload(),
   getPetWindowBounds,
   getHitRectScreen,
   getSessionHudAnchorRect,
@@ -3053,6 +3141,8 @@ const _sessionHud = require("./session-hud")({
   guardAlwaysOnTop,
   reapplyMacVisibility,
   onReservedOffsetChange: () => repositionFloatingBubbles(),
+  // 二级菜单开合 / 面板收起会重置它：投影里带着 menuOpen，状态一变就重推一次。
+  onQuickStateChanged: () => pushQuickChatState(),
 });
 repositionSessionHud = _sessionHud.repositionSessionHud;
 repositionQuotaRing = _sessionHud.repositionQuotaRing;
@@ -3061,6 +3151,9 @@ broadcastSessionHudSnapshot = _sessionHud.broadcastSessionSnapshot;
 sendSessionHudI18n = _sessionHud.sendI18n;
 getSessionHudReservedOffset = _sessionHud.getHudReservedOffset;
 getSessionHudWindow = _sessionHud.getWindow;
+getSessionHudWindows = _sessionHud.getWindows;
+getSessionHudBlockRects = _sessionHud.getBlockRects;
+getSessionHudMenuOpen = () => !!(_sessionHud.isMenuOpen && _sessionHud.isMenuOpen());
 getQuotaRingWindow = _sessionHud.getQuotaRingWindow;
 
 agentRuntime = createAgentRuntimeMain({
@@ -5062,6 +5155,79 @@ const settingsIpcRuntime = registerSettingsIpc({
 // 内置对话的 IPC 通道（invoke + 状态推送）。app 用于监听窗口创建、did-finish-load
 // 后首推状态，并给粘贴图片提供系统临时目录；shell 用于打开外链（仅 http/https）；
 // getLang 决定弹窗与推送载荷的语言。
+// ── 悬停面板的快捷动作（session-ipc 转发到这里）──
+// 发消息：没有工作目录先走目录引导；忙时排队（chat-prompt-queue）；成功后
+// 打开对话窗口看回复。返回形状面向渲染端（ok/queued/full/error）。
+async function quickSendPrompt(text) {
+  try {
+    if (!chatRuntime.getState().cwd) await promptChatWorkingDirIfMissing();
+  } catch {}
+  const result = await chatPromptQueue.enqueue(text);
+  if (result.status === "sent" || result.status === "queued") {
+    // 面板收起上闩（防指针还停在桌宠上立刻弹回），并打开对话窗口看输出。
+    if (_sessionHud && typeof _sessionHud.dismissForAction === "function") {
+      _sessionHud.dismissForAction();
+    }
+    try {
+      chatWindowRuntime.open();
+    } catch (err) {
+      console.warn("Clawd: 打开对话窗口失败:", err && err.message);
+    }
+    pushQuickChatState();
+    return {
+      status: result.status === "sent" ? "ok" : "queued",
+      queuedCount: result.queuedCount,
+    };
+  }
+  if (result.status === "full") return { status: "full", queuedCount: result.queuedCount };
+  return { status: "error", message: "empty prompt" };
+}
+
+// 切 effort 会重置会话上下文（等于杀掉当前回合）：忙碌或还有排队时拒绝，
+// 不信渲染端的禁用状态，主进程二次把关。
+async function quickSetEffort(value) {
+  const state = chatRuntime.getState();
+  if (state.busy || chatPromptQueue.getSnapshot().count > 0) {
+    return { status: "error", message: "busy" };
+  }
+  const ok = await chatRuntime.setEffort(value);
+  pushQuickChatState();
+  return ok ? { status: "ok" } : { status: "error", message: "invalid effort" };
+}
+
+async function quickSetPermissionMode(value) {
+  const ok = await chatRuntime.setPermissionMode(value);
+  pushQuickChatState();
+  return ok ? { status: "ok" } : { status: "error", message: "invalid permission mode" };
+}
+
+async function quickPickWorkingDir() {
+  return pickChatWorkingDir();
+}
+
+function quickStopChat() {
+  // 必须先清队再 stop：stop 回到 idle 的边沿会触发排队器放行下一条。
+  clearQueueForContextReset("user-stop");
+  try { chatRuntime.stop(); } catch {}
+  pushQuickChatState();
+  return { status: "ok" };
+}
+
+function quickSetMenuOpen(open) {
+  if (!_sessionHud || typeof _sessionHud.setMenuOpen !== "function") {
+    return { status: "error", reason: "quick-panel-unavailable" };
+  }
+  _sessionHud.setMenuOpen(open === true);
+  pushQuickChatState();
+  return { status: "ok" };
+}
+
+function quickSetHold(reason, held) {
+  if (_sessionHud && typeof _sessionHud.setHold === "function") {
+    _sessionHud.setHold(reason, held);
+  }
+}
+
 chatIpcRuntime = registerChatIpc({
   ipcMain,
   app,
@@ -5077,6 +5243,10 @@ chatIpcRuntime = registerChatIpc({
   loadHistory: loadChatSessionHistory,
   resolveResumeTarget: resolveChatResumeTarget,
   loadBackfill: loadChatBackfill,
+  // 悬停面板排队器的清理钩子：用户点停止 / 换上下文（新会话、恢复、换目录）
+  // 都要同步清队，防止排队消息发进已经变了的上下文。
+  onUserStop: () => clearQueueForContextReset("user-stop"),
+  onContextReset: (reason) => clearQueueForContextReset(reason),
 });
 
 const sessionHistoryRuntime = createSessionHistoryRuntime({
@@ -5093,8 +5263,21 @@ const sessionHistoryRuntime = createSessionHistoryRuntime({
 registerSessionIpc({
   ipcMain,
   getSessionSnapshot: () => _state.buildSessionSnapshot(),
-  getI18n: () => getDashboardI18nPayload(),
+  // 悬停面板要用 chat 字典（effort/权限模式文案），合并载荷对 Dashboard 无副作用。
+  getI18n: () => getHudI18nPayload(),
   getDashboardWebContents: () => _dashboard.getWebContents(),
+  // 快捷输入面板的信任闸门与动作（发消息/切设置/选目录/停止/保持显示）。
+  getSessionHudWebContents: () => {
+    const hudWin = getSessionHudWindow();
+    return hudWin && !hudWin.isDestroyed() ? hudWin.webContents : null;
+  },
+  quickSendPrompt,
+  quickSetEffort,
+  quickSetPermissionMode,
+  quickPickWorkingDir,
+  quickStopChat,
+  quickSetHold,
+  quickSetMenuOpen,
   quickMode: _dashboard.quick,
   getKimiQuotaStatus: () => _kimiQuotaRuntime.getStatus(),
   refreshKimiQuota: () => _kimiQuotaRuntime.refresh(),
@@ -5125,18 +5308,6 @@ registerSessionIpc({
   getSessionHistory: () => sessionHistoryRuntime.getHistory(),
   resumeSessionFromHistory: (payload) => sessionHistoryRuntime.resume(payload),
   showDashboard: (options) => showDashboard(options),
-  setSessionHudPinned: (value) => {
-    const result = _settingsController.applyUpdate("sessionHudPinned", !!value);
-    if (result && typeof result.then === "function") {
-      result
-        .then((r) => {
-          if (r && r.status === "error") console.warn("Clawd: failed to pin Session HUD:", r.message);
-        })
-        .catch((err) => console.warn("Clawd: failed to pin Session HUD:", err && err.message));
-    } else if (result && result.status === "error") {
-      console.warn("Clawd: failed to pin Session HUD:", result.message);
-    }
-  },
   getLanWsServer: () => _lanWss,
 });
 
@@ -5248,6 +5419,9 @@ function createWindow() {
   hitWin.on("resize", () => petWindowRuntime.onHitNativeGeometryEvent());
 
   syncSessionHudVisibility();
+  // 面板 footer 的状态要先推一次初始值（effort/权限模式/目录名）：
+  // 只靠 onUpdate 的话，聊天会话没动静前渲染端一直显示硬编码兜底值。
+  pushQuickChatState();
 
   registerPetInteractionIpc({
     ipcMain,
@@ -5615,6 +5789,11 @@ const _roamCtx = {
       sendToRenderer("state-change", "roam", roamSvg);
     }
   },
+  // 快捷面板打开期间：宠物原地待命。用户正在输入或调设置，一边输它一边走
+  // 观感差（面板贴着宠物显示，它一走，面板就悬在原地）。
+  isQuickPanelOpen: () => !!(
+    _sessionHud && typeof _sessionHud.isPanelOpen === "function" && _sessionHud.isPanelOpen()
+  ),
   // #640: hold still while the user types into a bubble text field (macOS)
   isImeEditingActive: () => pendingPermissions.some(
     (p) => p

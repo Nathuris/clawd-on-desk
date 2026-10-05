@@ -201,8 +201,8 @@ function handleClick(clientX) {
   clickCount++;
   if (clickCount === 1) {
     firstClickDir = clientX < area.offsetWidth / 2 ? "left" : "right";
-    // First click reveals the session HUD. Lightweight side effect — NOT
-    // gated by isReacting (HUD reveal is independent of pet animation).
+    // First click reveals the quick panel (sessions + quick input footer).
+    // Lightweight side effect — NOT gated by isReacting.
     window.hitAPI.revealSessionHud();
   }
 

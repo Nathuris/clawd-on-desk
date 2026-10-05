@@ -93,6 +93,13 @@ module.exports = function initRoam(ctx) {
       ctx.isImeEditingActive()
     )
       return false;
+    // 快捷面板打开期间（用户正在输入或调设置）宠物原地待命：面板贴着它
+    // 显示，它一走面板就悬在原地。逐帧检查，面板一开立即停下当前一步。
+    if (
+      typeof ctx.isQuickPanelOpen === "function" &&
+      ctx.isQuickPanelOpen()
+    )
+      return false;
     return true;
   }
 

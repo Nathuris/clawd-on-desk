@@ -63,6 +63,8 @@ function createHarness({ isMac = false, sendState = {} } = {}) {
         exitMiniMode: () => apiCalls.push(["exitMiniMode"]),
         showDashboard: () => apiCalls.push(["showDashboard"]),
         revealSessionHud: () => apiCalls.push(["revealSessionHud"]),
+        // 单击新契约：直接打开对话窗口（不再揭示会话 HUD）
+        openChat: () => apiCalls.push(["openChat"]),
         startDragReaction: (direction) => apiCalls.push(["startDragReaction", direction]),
         endDragReaction: () => apiCalls.push(["endDragReaction"]),
         playClickReaction: (svg, d) => apiCalls.push(["playClickReaction", svg, d]),
@@ -124,19 +126,21 @@ function createHarness({ isMac = false, sendState = {} } = {}) {
 }
 
 describe("hit-renderer input layer", () => {
-  it("plain single click reveals HUD, does NOT call focusTerminal", () => {
+  it("plain single click reveals HUD, does NOT call focusTerminal or openChat", () => {
     const h = createHarness();
     h.pointerup({});
     const names = h.apiCalls.map((c) => c[0]);
-    assert.ok(names.includes("revealSessionHud"), "should call revealSessionHud");
+    assert.ok(names.includes("revealSessionHud"), "should reveal the quick panel");
+    assert.ok(!names.includes("openChat"), "clicking the pet must NOT open the chat window");
     assert.ok(!names.includes("focusTerminal"), "must not call focusTerminal");
   });
 
-  it("Ctrl+click on non-mac opens Dashboard, does NOT call reveal", () => {
+  it("Ctrl+click on non-mac opens Dashboard, does NOT call openChat", () => {
     const h = createHarness({ isMac: false });
     h.pointerup({ ctrlKey: true });
     const names = h.apiCalls.map((c) => c[0]);
     assert.ok(names.includes("showDashboard"), "should open Dashboard");
+    assert.ok(!names.includes("openChat"), "must not open chat on Ctrl+click");
     assert.ok(!names.includes("revealSessionHud"), "must not reveal HUD on Ctrl+click");
   });
 
@@ -145,23 +149,26 @@ describe("hit-renderer input layer", () => {
     h.pointerup({ metaKey: true });
     const names = h.apiCalls.map((c) => c[0]);
     assert.ok(names.includes("showDashboard"));
+    assert.ok(!names.includes("openChat"), "must not open chat on Cmd+click");
     assert.ok(!names.includes("revealSessionHud"));
   });
 
-  it("Ctrl+click on mac does NOT open Dashboard and does NOT reveal (system right-click)", () => {
+  it("Ctrl+click on mac does NOT open Dashboard and does NOT open chat (system right-click)", () => {
     const h = createHarness({ isMac: true });
     h.pointerup({ ctrlKey: true });
     const names = h.apiCalls.map((c) => c[0]);
     assert.ok(!names.includes("showDashboard"), "mac Ctrl+click must not trigger Dashboard");
+    assert.ok(!names.includes("openChat"), "mac Ctrl+click must not open chat");
     assert.ok(!names.includes("revealSessionHud"), "mac Ctrl+click must not reveal HUD");
   });
 
-  it("miniMode + plain click calls exitMiniMode (not reveal)", () => {
+  it("miniMode + plain click calls exitMiniMode (not openChat)", () => {
     const h = createHarness();
     h.apiHandlers.stateSync({ miniMode: true });
     h.pointerup({});
     const names = h.apiCalls.map((c) => c[0]);
     assert.ok(names.includes("exitMiniMode"), "miniMode plain click should exit mini");
+    assert.ok(!names.includes("openChat"), "miniMode plain click should not open chat");
     assert.ok(!names.includes("revealSessionHud"), "miniMode plain click should not reveal HUD");
   });
 
@@ -179,8 +186,9 @@ describe("hit-renderer input layer", () => {
     h.apiHandlers.stateSync({ currentState: "working" });
     h.pointerup({});
     const names = h.apiCalls.map((c) => c[0]);
-    // v5 change: reveal HUD even in non-idle states (so user can peek progress)
+    // 即使非 idle 状态也允许单击弹面板（门控只作用于宠物动画）
     assert.ok(names.includes("revealSessionHud"));
+    assert.ok(!names.includes("openChat"));
     assert.ok(!names.includes("focusTerminal"));
   });
 

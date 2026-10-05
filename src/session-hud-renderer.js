@@ -1,510 +1,476 @@
 "use strict";
 
-const { canOfferLocalFolder, focusUnavailableReasonKey } = globalThis.ClawdSessionFocusUnavailable;
+// ══════════════════════════════════════════════════════════════════
+// Session HUD 渲染端（整块面板一份）
+//
+// 单窗口整块卡片，从上到下：
+//   状态行 → 「权限模式 · effort」按钮 → 工作文件夹行 → 输入框（+ 停止按钮）
+//
+// 点按钮展开二级设置菜单（卡片随之变高）：上方是权限模式列表（每项带一行
+// 解释），下方是 effort 左右滑块。菜单开关状态由主进程持有，渲染端只投影
+// （窗口高度要跟着变，渲染端自己存状态会跟窗口尺寸脱节）。
+//
+// 窗口的显隐与尺寸都由主进程负责（showInactive() 显示），渲染端不关心。
+// 语言和 quick-state 推送都只更新已有节点的内容，不重建输入框/滑块，
+// 这样打字时的焦点和草稿不会丢。
+// ══════════════════════════════════════════════════════════════════
 
-const HUD_MAX_EXPANDED_ROWS = 3;
-const HUD_MAX_EXPANDED_ROWS_LABELS = 5;
-const HUD_TITLE_MAX_UNITS = 15;
-const RECENT_DONE_UNREAD_MS = 60 * 1000;
-const SESSION_ACTION_FEEDBACK_MS = 4000;
+const QUICK_FEEDBACK_MS = 4000;
 
-let snapshot = { sessions: [], orderedIds: [], hudTotalNonIdle: 0, hudLastTitle: null, hudShowStateLabels: true, hudShowElapsed: true, hudShowContextUsage: true, hudShowQuota: true, hudPinned: false, accountQuota: [] };
-let i18nPayload = { lang: "en", translations: {} };
+// effort / 权限模式的取值顺序（与主进程约定一致）
+const EFFORT_OPTIONS = ["low", "medium", "high", "xhigh", "max"];
+const EFFORT_OPTION_KEYS = { low: "chatEffortLow", medium: "chatEffortMedium", high: "chatEffortHigh", xhigh: "chatEffortXhigh", max: "chatEffortMax" };
+const MODE_OPTIONS = ["default", "acceptEdits", "plan", "auto"];
+const MODE_OPTION_KEYS = { default: "chatModeDefault", acceptEdits: "chatModeAcceptEdits", plan: "chatModePlan", auto: "chatModeAuto" };
+// 模式名下方的一行解释（菜单里显示，帮用户选）
+const MODE_DESC_KEYS = { default: "chatModeDefaultDesc", acceptEdits: "chatModeAcceptEditsDesc", plan: "chatModePlanDesc", auto: "chatModeAutoDesc" };
 
-const unreadSessions = new Set();
-const prevBadges = new Map();
-const pendingFolderSessions = new Set();
-let sessionActionFeedback = null;
-let sessionActionFeedbackTimer = null;
+// 停止按钮的图标（圆角方块）
+const STOP_SVG = `<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>`;
 
 const hudEl = document.getElementById("hud");
 
-function isHudSession(session) {
-  return !!session && !session.headless && session.state !== "sleeping" && !session.hiddenFromHud;
-}
+let i18nPayload = { lang: "en", translations: {} };
+// i18n 未就绪前不写文案，避免闪出一串 key 名
+let i18nReady = false;
+
+// 主进程推送的快捷状态（字段缺失时用 normalizeQuickState 兜默认值）
+let quickState = normalizeQuickState(null);
+
+// 输入块上的临时提示（发送失败 / 队列满），4 秒后自动消失
+let quickFeedback = null;
+let quickFeedbackTimer = null;
+
+// 常驻节点：面板只建一次，之后只改内容
+let statusTextEl = null;
+let promptInputEl = null;
+let stopBtnEl = null;
+let levelBtnEl = null;
+let levelLabelEl = null;
+const modeOptionEls = [];   // [{ value, el, nameEl, descEl }]
+let effortRangeEl = null;
+let effortLabelEl = null;
+let effortValueEl = null;
+let folderBtnEl = null;
+let folderLabelEl = null;
+// 正在拖 effort 滑块：拖动期间不被 quick-state 推来的旧值抢回去。
+let effortDragging = false;
 
 function t(key) {
   const dict = i18nPayload && i18nPayload.translations ? i18nPayload.translations : {};
   return dict[key] || key;
 }
 
-function formatElapsed(ms) {
-  const sec = Math.max(0, Math.floor(ms / 1000));
-  if (sec < 5) return t("sessionJustNow");
-  if (sec < 60) return t("sessionHudElapsedSec").replace("{n}", sec);
-  const min = Math.floor(sec / 60);
-  if (min < 5) {
-    const secRem = sec % 60;
-    return t("sessionHudElapsedMinSec")
-      .replace("{m}", min)
-      .replace("{s}", secRem);
-  }
-  if (min < 60) return t("sessionMinAgo").replace("{n}", min);
-  const hr = Math.floor(min / 60);
-  return t("sessionHrAgo").replace("{n}", hr);
-}
-
-function formatTokenCount(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) return "";
-  if (n >= 1000000) {
-    const formatted = (n / 1000000).toFixed(n >= 10000000 ? 0 : 1);
-    return `${formatted.replace(/\.0$/, "")}m`;
-  }
-  if (n >= 1000) {
-    const formatted = (n / 1000).toFixed(n >= 10000 ? 0 : 1);
-    return `${formatted.replace(/\.0$/, "")}k`;
-  }
-  return String(Math.round(n));
-}
-
-function titleFor(session) {
-  return session.displayTitle || session.sessionTitle || session.id || "";
-}
-
-function titleUnits(value) {
-  let units = 0;
-  for (const ch of String(value || "")) {
-    if (/\s/.test(ch)) units += 0.5;
-    else units += ch.charCodeAt(0) > 0x7F ? 2 : 1;
-  }
-  return units;
-}
-
-function shortenHudTitle(value) {
-  const full = String(value || "").replace(/\s+/g, " ").trim();
-  if (!full || titleUnits(full) <= HUD_TITLE_MAX_UNITS) return full;
-
-  let units = 0;
-  let out = "";
-  for (const ch of full) {
-    const nextUnits = /\s/.test(ch) ? 0.5 : (ch.charCodeAt(0) > 0x7F ? 2 : 1);
-    if (units + nextUnits > HUD_TITLE_MAX_UNITS) break;
-    out += ch;
-    units += nextUnits;
-  }
-
-  let trimmed = out.trimEnd();
-  const next = full[trimmed.length] || "";
-  if (/[A-Za-z0-9]/.test(trimmed.slice(-1)) && /[A-Za-z0-9]/.test(next)) {
-    const wordTrimmed = trimmed.replace(/\s+\S*$/, "").trimEnd();
-    if (wordTrimmed && titleUnits(wordTrimmed) >= HUD_TITLE_MAX_UNITS * 0.55) {
-      trimmed = wordTrimmed;
-    }
-  }
-  return `${trimmed}\u2026`;
-}
-
-function orderedHudSessions(currentSnapshot) {
-  const sessions = Array.isArray(currentSnapshot.sessions) ? currentSnapshot.sessions : [];
-  const byId = new Map(sessions.map((session) => [session.id, session]));
-  const ids = Array.isArray(currentSnapshot.orderedIds)
-    ? currentSnapshot.orderedIds
-    : sessions.map((session) => session.id);
-  const ordered = ids.map((id) => byId.get(id)).filter(Boolean);
-  const orderedIds = new Set(ordered.map((session) => session.id));
-  const missing = sessions.filter((session) => !orderedIds.has(session.id));
-  return ordered.concat(missing).filter(isHudSession);
-}
-
-const STATE_CHIP_MAP = {
-  thinking: { key: "sessionThinking", cls: "chip-thinking" },
-  working: { key: "sessionWorking", cls: "chip-working" },
-  juggling: { key: "sessionJuggling", cls: "chip-juggling" },
-};
-
-const EVENT_CHIP_MAP = {
-  PreCompact: { key: "sessionSweeping", cls: "chip-sweeping" },
-  PreCompress: { key: "sessionSweeping", cls: "chip-sweeping" },
-  PermissionRequest: { key: "sessionNotification", cls: "chip-notification" },
-  Elicitation: { key: "sessionNotification", cls: "chip-notification" },
-  Notification: { key: "sessionNotification", cls: "chip-notification" },
-  WorktreeCreate: { key: "sessionWorktree", cls: "chip-worktree" },
-};
-
-function makeChipInfo(entry) {
-  return entry ? { label: t(entry.key), cls: entry.cls } : null;
-}
-
-function stateChipInfo(session) {
-  if (snapshot.hudShowStateLabels === false) {
-    return session && session.startupRecovered
-      ? { label: t("sessionRecovered"), cls: "chip-recovered" }
-      : null;
-  }
-  const rawEvent = session && session.lastEvent && session.lastEvent.rawEvent;
-  const eventChip = makeChipInfo(EVENT_CHIP_MAP[rawEvent]);
-  if (eventChip && session.badge !== "done" && session.badge !== "interrupted") return eventChip;
-
-  if (session.badge === "running") {
-    const stateChip = makeChipInfo(STATE_CHIP_MAP[session.state]);
-    if (stateChip) {
-      return session.startupRecovered
-        ? { label: `${t("sessionRecovered")} · ${stateChip.label}`, cls: `${stateChip.cls} chip-recovered` }
-        : stateChip;
-    }
-    if (session.startupRecovered) return { label: t("sessionRecovered"), cls: "chip-recovered" };
-    return { label: t("sessionBadgeRunning"), cls: "chip-working" };
-  }
-  if (session.badge === "interrupted") {
-    return { label: t("sessionBadgeInterrupted"), cls: "chip-interrupted" };
-  }
-  return null;
-}
-
-function usageChipInfo(session) {
-  if (snapshot.hudShowContextUsage === false) return null;
-  const usage = session && session.contextUsage;
-  if (!usage || !Number.isFinite(Number(usage.used))) return null;
-  const usedLabel = formatTokenCount(usage.used);
-  const percentKnown = Number.isFinite(Number(usage.percent));
-  if (percentKnown) {
-    const percent = Math.max(0, Math.min(100, Math.round(Number(usage.percent))));
-    const hasLimit = Number.isFinite(Number(usage.limit));
-    return {
-      label: `${percent}%`,
-      cls: percent >= 90 ? "usage-hot" : (percent >= 75 ? "usage-warm" : "usage-neutral"),
-      title: hasLimit
-        ? t("sessionHudContextUsageTooltip")
-          .replace("{used}", usedLabel)
-          .replace("{limit}", formatTokenCount(usage.limit))
-          .replace("{percent}", percent)
-        : t("sessionHudContextUsageTooltipUnknownLimit").replace("{used}", usedLabel),
-    };
-  }
+// 主进程推送的 quick-state 可能缺字段，这里统一补默认值
+function normalizeQuickState(raw) {
+  const s = raw && typeof raw === "object" ? raw : {};
+  const queued = Number(s.queuedCount);
   return {
-    label: usedLabel,
-    cls: "usage-neutral",
-    title: t("sessionHudContextUsageTooltipUnknownLimit").replace("{used}", usedLabel),
+    effort: EFFORT_OPTIONS.includes(s.effort) ? s.effort : "medium",
+    permissionMode: MODE_OPTIONS.includes(s.permissionMode) ? s.permissionMode : "default",
+    status: typeof s.status === "string" && s.status ? s.status : "idle",
+    busy: !!s.busy,
+    queuedCount: Number.isFinite(queued) && queued > 0 ? Math.floor(queued) : 0,
+    blocked: s.blocked === "no-cwd" ? "no-cwd" : null,
+    hasCwd: !!s.hasCwd,
+    cwdName: typeof s.cwdName === "string" && s.cwdName ? s.cwdName : null,
+    menuOpen: !!s.menuOpen,
   };
 }
 
-const BELL_SVG = `<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>`;
-const FOCUS_UNAVAILABLE_SVG = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4l16 16"/><path d="M9.5 5h5"/><path d="M7 9h10"/><path d="M5 14h9"/><path d="M12 19h5"/></svg>`;
-const FOLDER_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h6l2 2h10v9H3z"/><path d="M3 7V5h6l2 2"/></svg>`;
-const PIN_SVG_FILLED = `<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M14 4l6 6-4 1-3 3 1 5-2 1-4-4-5 5-1-1 5-5-4-4 1-2 5 1 3-3 1-4z"/></svg>`;
-const PIN_SVG_OUTLINE = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M14 4l6 6-4 1-3 3 1 5-2 1-4-4-5 5-1-1 5-5-4-4 1-2 5 1 3-3 1-4z"/></svg>`;
+/* ===== 状态行 / 输入 ===== */
 
-function updateUnread(sessions) {
-  const now = Date.now();
-  const currentIds = new Set(sessions.map((s) => s.id));
-  for (const id of unreadSessions) {
-    if (!currentIds.has(id)) unreadSessions.delete(id);
+// 状态行文字（优先级）：临时提示 > 未选工作目录 > busy > error > idle；
+// 有排队时一律追加「· 已排队 n」（即使没在忙）。
+function quickStatusText() {
+  if (quickFeedback) return quickFeedback;
+  if (quickState.blocked === "no-cwd") return t("hudQuickNoCwd");
+  let text = quickState.busy
+    ? t("hudQuickStatusWorking")
+    : (quickState.status === "error" ? t("hudQuickStatusError") : t("hudQuickStatusIdle"));
+  if (quickState.queuedCount > 0) {
+    text += ` · ${t("hudQuickQueued").replace("{n}", String(quickState.queuedCount))}`;
   }
-  for (const session of sessions) {
-    const prev = prevBadges.get(session.id);
-    const curr = session.badge;
-    if (curr !== "done") {
-      unreadSessions.delete(session.id);
-    } else if (prev !== undefined && prev !== "done") {
-      unreadSessions.add(session.id);
-    } else if (prev === undefined) {
-      const updatedAt = Number(session.updatedAt);
-      if (Number.isFinite(updatedAt) && now - updatedAt <= RECENT_DONE_UNREAD_MS) {
-        unreadSessions.add(session.id);
-      }
-    }
-    prevBadges.set(session.id, curr);
-  }
-  for (const id of prevBadges.keys()) {
-    if (!currentIds.has(id)) prevBadges.delete(id);
+  return text;
+}
+
+// 状态行只在内容/样式真的变了才动，避免无谓重排
+function updateStatusRow() {
+  if (!statusTextEl || !i18nReady) return;
+  const text = quickStatusText();
+  if (statusTextEl.textContent !== text) statusTextEl.textContent = text;
+  const isError = !!quickFeedback
+    || (quickState.blocked !== "no-cwd" && !quickState.busy && quickState.status === "error");
+  if (statusTextEl.classList.contains("is-error") !== isError) {
+    statusTextEl.classList.toggle("is-error", isError);
   }
 }
 
-function splitHudLayout(sessions) {
-  const maxRows = snapshot.hudShowStateLabels === false
-    ? HUD_MAX_EXPANDED_ROWS
-    : HUD_MAX_EXPANDED_ROWS_LABELS;
-  const expanded = sessions.slice(0, maxRows);
-  const folded = sessions.slice(maxRows);
-  return { expanded, folded };
+// 停止按钮只在正忙时出现（行高固定 32px，出现/消失不影响卡片高度）
+function updateStopButton() {
+  if (!stopBtnEl) return;
+  const display = quickState.busy ? "" : "none";
+  if (stopBtnEl.style.display !== display) stopBtnEl.style.display = display;
 }
 
-function focusUnavailableTooltip(session) {
-  return t(focusUnavailableReasonKey(session));
+function showQuickFeedback(message) {
+  if (quickFeedbackTimer) clearTimeout(quickFeedbackTimer);
+  quickFeedback = message;
+  updateStatusRow();
+  quickFeedbackTimer = setTimeout(() => {
+    quickFeedbackTimer = null;
+    quickFeedback = null;
+    updateStatusRow();
+  }, QUICK_FEEDBACK_MS);
 }
 
-function showSessionFeedback(sessionId, message) {
-  if (sessionActionFeedbackTimer) clearTimeout(sessionActionFeedbackTimer);
-  sessionActionFeedback = {
-    sessionId,
-    message,
-    expiresAt: Date.now() + SESSION_ACTION_FEEDBACK_MS,
-  };
-  render();
-  sessionActionFeedbackTimer = setTimeout(() => {
-    sessionActionFeedbackTimer = null;
-    sessionActionFeedback = null;
-    render();
-  }, SESSION_ACTION_FEEDBACK_MS);
+function createStatusRow() {
+  const statusRow = document.createElement("div");
+  statusRow.className = "quick-status-row";
+  statusTextEl = document.createElement("span");
+  statusTextEl.className = "quick-status-text";
+  statusRow.appendChild(statusTextEl);
+  return statusRow;
 }
 
-function sessionFeedbackText(sessionId, now) {
-  if (!sessionActionFeedback || sessionActionFeedback.sessionId !== sessionId) return "";
-  return sessionActionFeedback.expiresAt > now ? sessionActionFeedback.message : "";
+function createLevelRow() {
+  levelBtnEl = document.createElement("button");
+  levelBtnEl.type = "button";
+  levelBtnEl.className = "quick-level-btn";
+  levelLabelEl = document.createElement("span");
+  levelLabelEl.className = "quick-level-label";
+  const caret = document.createElement("span");
+  caret.className = "quick-level-caret";
+  levelBtnEl.appendChild(levelLabelEl);
+  levelBtnEl.appendChild(caret);
+  // 开合状态在主进程；这里只发请求，界面等状态推回来再变。
+  levelBtnEl.addEventListener("click", handleLevelToggle);
+  return levelBtnEl;
 }
 
-function openFolderFailureText(result) {
-  if (result && result.status === "error" && result.message) {
-    return t("sessionOpenFolderFailed").replace("{reason}", result.message);
+// 二级菜单：上方权限模式列表（名称 + 解释），下方 effort 滑块。
+function createMenu() {
+  const menu = document.createElement("div");
+  menu.className = "quick-menu";
+
+  const modes = document.createElement("div");
+  modes.className = "quick-menu-modes";
+  for (const value of MODE_OPTIONS) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "quick-mode-option";
+    const nameEl = document.createElement("span");
+    nameEl.className = "quick-mode-name";
+    const descEl = document.createElement("span");
+    descEl.className = "quick-mode-desc";
+    option.appendChild(nameEl);
+    option.appendChild(descEl);
+    option.addEventListener("click", () => handleModePick(value));
+    modeOptionEls.push({ value, el: option, nameEl, descEl });
+    modes.appendChild(option);
   }
-  return t("sessionOpenFolderUnavailable");
+
+  const effortBox = document.createElement("div");
+  effortBox.className = "quick-menu-effort";
+  const head = document.createElement("div");
+  head.className = "quick-effort-head";
+  effortLabelEl = document.createElement("span");
+  effortLabelEl.className = "quick-effort-label";
+  effortValueEl = document.createElement("span");
+  effortValueEl.className = "quick-effort-value";
+  head.appendChild(effortLabelEl);
+  head.appendChild(effortValueEl);
+
+  effortRangeEl = document.createElement("input");
+  effortRangeEl.type = "range";
+  effortRangeEl.className = "quick-effort-range";
+  effortRangeEl.min = "0";
+  effortRangeEl.max = String(EFFORT_OPTIONS.length - 1);
+  effortRangeEl.step = "1";
+  // 拖动中（input）只改本地显示，松手（change）才发请求——effort 会重置
+  // 会话上下文，不能每挪一格就发一次。
+  effortRangeEl.addEventListener("input", handleEffortSlide);
+  effortRangeEl.addEventListener("change", handleEffortCommit);
+
+  effortBox.appendChild(head);
+  effortBox.appendChild(effortRangeEl);
+  menu.appendChild(modes);
+  menu.appendChild(effortBox);
+  return menu;
 }
 
-function createRowForSession(session, now) {
-  const row = document.createElement("div");
-  row.className = "row";
-  const canFocus = session.canFocus === true;
-  const feedbackText = sessionFeedbackText(session.id, now);
-  if (!canFocus) {
-    row.classList.add("row-unfocusable");
-    row.title = focusUnavailableTooltip(session);
-  }
+function createFolderRow() {
+  folderBtnEl = document.createElement("button");
+  folderBtnEl.type = "button";
+  folderBtnEl.className = "quick-folder-btn";
+  folderLabelEl = document.createElement("span");
+  folderLabelEl.className = "quick-folder-label";
+  folderBtnEl.appendChild(folderLabelEl);
+  folderBtnEl.addEventListener("click", handlePickFolder);
+  return folderBtnEl;
+}
 
-  const left = document.createElement("div");
-  left.className = "left";
+function createInputRow() {
+  const inputRow = document.createElement("div");
+  inputRow.className = "quick-input-row";
 
-  const dot = document.createElement("span");
-  dot.className = `dot dot-${session.badge || "idle"}`;
-  left.appendChild(dot);
-
-  if (session.iconUrl) {
-    const img = document.createElement("img");
-    img.className = "agent-icon";
-    img.alt = "";
-    img.src = session.iconUrl;
-    left.appendChild(img);
-  }
-
-  // Source marker for non-local sessions (compact emoji indicator)
-  if (session.sourceType && session.sourceType !== "local") {
-    const sourceMarker = document.createElement("span");
-    sourceMarker.className = `hud-source hud-source-${session.sourceType}`;
-    sourceMarker.title = session.sourceDisplayLabel || session.sourceLabel || "";
-    sourceMarker.textContent = session.sourceType === "wsl" ? "🐧" : "🔗";
-    left.appendChild(sourceMarker);
-  }
-
-  const title = document.createElement("span");
-  const fullTitle = titleFor(session);
-  const shortTitle = shortenHudTitle(fullTitle);
-  title.className = feedbackText ? "title session-inline-feedback" : "title";
-  title.textContent = feedbackText || shortTitle;
-  if (feedbackText) {
-    title.title = feedbackText;
-    title.setAttribute("aria-live", "polite");
-  } else if (shortTitle && shortTitle !== fullTitle) {
-    title.title = fullTitle;
-  }
-  left.appendChild(title);
-
-  const showElapsed = snapshot.hudShowElapsed !== false;
-  const right = document.createElement("span");
-  right.className = "right";
-  let hasRightContent = false;
-
-  if (!feedbackText && session.badge === "done" && unreadSessions.has(session.id)) {
-    const bell = document.createElement("span");
-    bell.className = "completion-bell unread-bell";
-    bell.innerHTML = BELL_SVG;
-    right.appendChild(bell);
-    hasRightContent = true;
-
-  }
-
-  if (!canFocus) {
-    if (!feedbackText) {
-      const marker = document.createElement("span");
-      marker.className = "focus-unavailable";
-      marker.innerHTML = FOCUS_UNAVAILABLE_SVG;
-      marker.title = focusUnavailableTooltip(session);
-      marker.setAttribute("aria-label", focusUnavailableTooltip(session));
-      right.appendChild(marker);
-      hasRightContent = true;
-    }
-
-    if (canOfferLocalFolder(session)) {
-      const openFolder = document.createElement("button");
-      openFolder.type = "button";
-      openFolder.className = "open-folder-button";
-      openFolder.innerHTML = FOLDER_SVG;
-      openFolder.title = t("dashboardOpenFolder");
-      openFolder.setAttribute("aria-label", t("dashboardOpenFolder"));
-      openFolder.disabled = pendingFolderSessions.has(session.id);
-      openFolder.addEventListener("click", async (event) => {
-        event.stopPropagation();
-        if (pendingFolderSessions.has(session.id)) return;
-        pendingFolderSessions.add(session.id);
-        openFolder.disabled = true;
-        render();
-        let feedbackMessage = "";
-        try {
-          const result = await window.sessionHudAPI.openSessionFolder(session.id);
-          if (!result || result.status !== "ok") {
-            feedbackMessage = openFolderFailureText(result);
-          }
-        } catch (err) {
-          feedbackMessage = t("sessionOpenFolderFailed")
-            .replace("{reason}", err && err.message ? err.message : String(err));
-          console.warn("open session folder threw:", err);
-        }
-        pendingFolderSessions.delete(session.id);
-        if (feedbackMessage) showSessionFeedback(session.id, feedbackMessage);
-        else render();
-      });
-      right.appendChild(openFolder);
-      hasRightContent = true;
-    }
-  }
-
-  const chipInfo = feedbackText ? null : stateChipInfo(session);
-  if (chipInfo) {
-    const chip = document.createElement("span");
-    chip.className = `state-chip ${chipInfo.cls}`;
-    chip.textContent = chipInfo.label;
-    right.appendChild(chip);
-    hasRightContent = true;
-  }
-
-  const usageInfo = feedbackText ? null : usageChipInfo(session);
-  if (usageInfo && usageInfo.label) {
-    const chip = document.createElement("span");
-    chip.className = `usage-chip ${usageInfo.cls}`;
-    chip.textContent = usageInfo.label;
-    chip.title = usageInfo.title;
-    right.appendChild(chip);
-    hasRightContent = true;
-  }
-
-  if (showElapsed && !feedbackText) {
-    const updatedAt = Number(session.updatedAt) || now;
-    const elapsed = document.createElement("span");
-    elapsed.className = "elapsed";
-    elapsed.dataset.updatedAt = String(updatedAt);
-    elapsed.textContent = formatElapsed(now - updatedAt);
-    right.appendChild(elapsed);
-    hasRightContent = true;
-  }
-
-  row.appendChild(left);
-  if (hasRightContent) row.appendChild(right);
-
-  row.addEventListener("click", () => {
-    unreadSessions.delete(session.id);
-    if (canFocus) {
-      render();
-      window.sessionHudAPI.focusSession(session.id);
-    } else {
-      showSessionFeedback(session.id, focusUnavailableTooltip(session));
-    }
-    // Fire-and-forget: the row click's primary intent is focus / unread
-    // dismissal. ack failure shouldn't block the UI — the next snapshot
-    // will reconcile the lifecycle flag.
-    if (window.sessionHudAPI && typeof window.sessionHudAPI.ackCompletion === "function") {
-      Promise.resolve(window.sessionHudAPI.ackCompletion(session.id)).catch((err) => {
-        console.warn("ack completion threw:", err);
-      });
-    }
+  promptInputEl = document.createElement("input");
+  promptInputEl.type = "text";
+  promptInputEl.className = "quick-input";
+  promptInputEl.addEventListener("keydown", handleInputKeydown);
+  // 聚焦 / 有草稿时让面板保持显示（hold 由主进程解释）
+  promptInputEl.addEventListener("focus", () => {
+    window.sessionHudAPI.setHold("focus", true);
+  });
+  promptInputEl.addEventListener("blur", () => {
+    window.sessionHudAPI.setHold("focus", false);
+  });
+  promptInputEl.addEventListener("input", () => {
+    window.sessionHudAPI.setHold("draft", promptInputEl.value.length > 0);
   });
 
-  return row;
+  stopBtnEl = document.createElement("button");
+  stopBtnEl.type = "button";
+  stopBtnEl.className = "quick-stop-btn";
+  stopBtnEl.innerHTML = STOP_SVG;
+  stopBtnEl.style.display = "none";
+  stopBtnEl.addEventListener("click", handleStopChat);
+
+  inputRow.appendChild(promptInputEl);
+  inputRow.appendChild(stopBtnEl);
+  return inputRow;
 }
 
-function createFoldedRow(count) {
-  const row = document.createElement("div");
-  row.className = "row row-folded";
-
-  const left = document.createElement("div");
-  left.className = "left";
-
-  const dot = document.createElement("span");
-  dot.className = "dot dot-idle";
-  left.appendChild(dot);
-
-  const title = document.createElement("span");
-  title.className = "title";
-  title.textContent = t("sessionHudOtherActive").replace("{n}", count);
-  left.appendChild(title);
-
-  row.appendChild(left);
-
-  row.addEventListener("click", () => {
-    window.sessionHudAPI.openDashboard();
-  });
-
-  return row;
+function handleInputKeydown(event) {
+  // 229 / isComposing：中文等输入法组字过程中不触发发送
+  if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229) {
+    event.preventDefault();
+    handleSendPrompt();
+  }
 }
 
-function createPinButton(pinned) {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = pinned ? "pin-btn pinned" : "pin-btn";
-  btn.innerHTML = pinned ? PIN_SVG_FILLED : PIN_SVG_OUTLINE;
-  const tipKey = pinned ? "sessionHudUnpinTooltip" : "sessionHudPinTooltip";
-  btn.title = t(tipKey);
-  btn.setAttribute("aria-label", t(tipKey));
-  btn.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    window.sessionHudAPI.setPinned(!pinned);
-  });
-  return btn;
+// 回车发送：成功/排队 → 清空输入框；队列满 / 失败 → 保留文字并在状态行提示
+async function handleSendPrompt() {
+  if (!promptInputEl) return;
+  const text = promptInputEl.value;
+  if (!text || !text.trim()) return; // 空白不发送
+  try {
+    const result = await window.sessionHudAPI.sendPrompt(text);
+    const status = result && result.status;
+    if (status === "ok" || status === "queued") {
+      promptInputEl.value = "";
+      window.sessionHudAPI.setHold("draft", false);
+      return;
+    }
+    showQuickFeedback(status === "full" ? t("hudQuickQueueFull") : t("hudQuickSendFailed"));
+  } catch (err) {
+    console.warn("send prompt threw:", err);
+    showQuickFeedback(t("hudQuickSendFailed"));
+  }
 }
 
-function render() {
-  const sessions = orderedHudSessions(snapshot);
-  const currentIds = new Set(sessions.map((session) => session.id));
-  for (const sessionId of pendingFolderSessions) {
-    if (!currentIds.has(sessionId)) pendingFolderSessions.delete(sessionId);
+async function handleStopChat() {
+  try {
+    await window.sessionHudAPI.stopChat();
+  } catch (err) {
+    console.warn("stop chat threw:", err);
   }
-  if (sessionActionFeedback && !currentIds.has(sessionActionFeedback.sessionId)) {
-    if (sessionActionFeedbackTimer) clearTimeout(sessionActionFeedbackTimer);
-    sessionActionFeedbackTimer = null;
-    sessionActionFeedback = null;
-  }
-  updateUnread(sessions);
-  hudEl.replaceChildren();
-  hudEl.classList.add("has-pin");
-  // The HUD shows sessions only; account quota now lives in the pet-attached
-  // quota ring window (quota-ring.html).
-  if (!sessions.length) return;
-
-  const now = Date.now();
-  const { expanded, folded } = splitHudLayout(sessions);
-
-  for (const session of expanded) {
-    hudEl.appendChild(createRowForSession(session, now));
-  }
-  if (folded.length > 0) {
-    hudEl.appendChild(createFoldedRow(folded.length));
-  }
-
-  hudEl.appendChild(createPinButton(snapshot.hudPinned === true));
 }
 
-function updateElapsedLabels() {
-  const now = Date.now();
-  for (const elapsed of document.querySelectorAll(".elapsed[data-updated-at]")) {
-    const updatedAt = Number(elapsed.dataset.updatedAt);
-    if (!Number.isFinite(updatedAt)) continue;
-    elapsed.textContent = formatElapsed(now - updatedAt);
+/* ===== 权限模式 / effort / 文件夹 ===== */
+
+// 「权限模式 · effort」按钮的文案，如「自动 · 高」
+function levelButtonText(state = quickState) {
+  const mode = t(MODE_OPTION_KEYS[state.permissionMode] || state.permissionMode);
+  const effort = t(EFFORT_OPTION_KEYS[state.effort] || state.effort);
+  return `${mode} · ${effort}`;
+}
+
+function effortLabelText(value) {
+  return t(EFFORT_OPTION_KEYS[value] || value);
+}
+
+function setTextIfChanged(node, text) {
+  if (node && node.textContent !== text) node.textContent = text;
+}
+
+// 语言变化时只改文案，不重建节点
+function syncMenuLabels() {
+  if (levelBtnEl) {
+    setTextIfChanged(levelLabelEl, levelButtonText());
+    const aria = `${t("chatModeLabel")} · ${t("chatEffortLabel")}`;
+    if (levelBtnEl.getAttribute("aria-label") !== aria) {
+      levelBtnEl.setAttribute("aria-label", aria);
+      levelBtnEl.title = aria;
+    }
   }
+  for (const { value, el, nameEl, descEl } of modeOptionEls) {
+    setTextIfChanged(nameEl, t(MODE_OPTION_KEYS[value] || value));
+    setTextIfChanged(descEl, t(MODE_DESC_KEYS[value] || ""));
+    el.setAttribute("aria-label", t(MODE_OPTION_KEYS[value] || value));
+  }
+  setTextIfChanged(effortLabelEl, t("chatEffortLabel"));
+  if (effortRangeEl) effortRangeEl.setAttribute("aria-label", t("chatEffortLabel"));
+}
+
+// 菜单/按钮跟随状态刷新：展开态、模式高亮、滑块位置与禁用态。
+function updateMenu() {
+  if (!i18nReady) return;
+  if (document.body) document.body.classList.toggle("menu-open", quickState.menuOpen);
+  syncMenuLabels();
+  for (const { value, el } of modeOptionEls) {
+    const active = value === quickState.permissionMode;
+    if (el.classList.contains("is-active") !== active) el.classList.toggle("is-active", active);
+  }
+  const index = Math.max(0, EFFORT_OPTIONS.indexOf(quickState.effort));
+  if (effortRangeEl) {
+    // 用户正在拖：不抢滑块；松手后（或状态推送）再对齐。
+    if (!effortDragging && Number(effortRangeEl.value) !== index) effortRangeEl.value = String(index);
+    // 正忙或有排队时不允许改 effort（会重置会话上下文）。
+    const disabled = quickState.busy || quickState.queuedCount > 0;
+    if (effortRangeEl.disabled !== disabled) effortRangeEl.disabled = disabled;
+    setTextIfChanged(effortValueEl, effortLabelText(EFFORT_OPTIONS[Number(effortRangeEl.value)] || quickState.effort));
+  }
+}
+
+function updateSettingsBlock() {
+  if (folderLabelEl) {
+    const label = quickState.cwdName || t("hudQuickPickFolder");
+    setTextIfChanged(folderLabelEl, label);
+    if (folderBtnEl.title !== label) folderBtnEl.title = label;
+  }
+}
+
+async function handleLevelToggle() {
+  try {
+    await window.sessionHudAPI.setMenuOpen(!quickState.menuOpen);
+  } catch (err) {
+    console.warn("set menu open threw:", err);
+  }
+}
+
+// 选了某个权限模式：高亮等状态推回来再变，失败保持原样。
+async function handleModePick(value) {
+  if (value === quickState.permissionMode) return;
+  try {
+    const result = await window.sessionHudAPI.setPermissionMode(value);
+    if (result && result.status === "error") {
+      throw new Error(result.message || "set permission mode failed");
+    }
+  } catch (err) {
+    console.warn("set permission mode threw:", err);
+  }
+}
+
+// 拖动滑块：只更新本地名称显示，不发请求。
+function handleEffortSlide() {
+  if (!effortRangeEl) return;
+  effortDragging = true;
+  const value = EFFORT_OPTIONS[Number(effortRangeEl.value)];
+  setTextIfChanged(effortValueEl, effortLabelText(value || quickState.effort));
+}
+
+// 松手才提交；失败（返回 error 或抛错）就回到当前生效档位。
+async function handleEffortCommit() {
+  if (!effortRangeEl) return;
+  effortDragging = false;
+  const index = Number(effortRangeEl.value);
+  const value = EFFORT_OPTIONS[index];
+  if (!value || value === quickState.effort) {
+    updateMenu();
+    return;
+  }
+  try {
+    const result = await window.sessionHudAPI.setEffort(value);
+    if (result && result.status === "error") {
+      throw new Error(result.message || "set effort failed");
+    }
+  } catch (err) {
+    console.warn("set effort threw:", err);
+    updateMenu();
+  }
+}
+
+async function handlePickFolder() {
+  try {
+    const result = await window.sessionHudAPI.pickWorkingDir();
+    if (result && result.status === "error") {
+      console.warn("pick working dir failed:", result.message);
+    }
+  } catch (err) {
+    console.warn("pick working dir threw:", err);
+  }
+}
+
+/* ===== 组装 / 刷新 ===== */
+
+// 语言刷新：只改文案，不重建任何节点（保住输入框焦点与草稿）
+function refreshTexts() {
+  if (promptInputEl) {
+    const placeholder = t("hudQuickPlaceholder");
+    if (promptInputEl.placeholder !== placeholder) promptInputEl.placeholder = placeholder;
+  }
+  if (stopBtnEl) {
+    const stopLabel = t("hudQuickStop");
+    if (stopBtnEl.getAttribute("aria-label") !== stopLabel) {
+      stopBtnEl.setAttribute("aria-label", stopLabel);
+      stopBtnEl.title = stopLabel;
+    }
+  }
+  updateMenu();
+  updateStatusRow();
+  updateSettingsBlock();
+}
+
+function buildPanel() {
+  if (!hudEl) return;
+  const card = document.createElement("div");
+  card.className = "quick-card";
+  card.appendChild(createStatusRow());
+  card.appendChild(createLevelRow());
+  card.appendChild(createMenu());
+  card.appendChild(createFolderRow());
+  card.appendChild(createInputRow());
+  hudEl.appendChild(card);
 }
 
 async function init() {
+  // 先把 DOM 搭出来，文案等 i18n 到了再填
+  buildPanel();
+
   window.sessionHudAPI.onLangChange((payload) => {
     i18nPayload = payload || i18nPayload;
-    render();
+    i18nReady = true;
+    refreshTexts();
   });
-  window.sessionHudAPI.onSessionSnapshot((nextSnapshot) => {
-    snapshot = nextSnapshot || snapshot;
-    render();
+  // quick-state 只更新对应控件，不重建 DOM，避免打字时丢焦点
+  window.sessionHudAPI.onQuickState((next) => {
+    quickState = normalizeQuickState(next);
+    updateStatusRow();
+    updateStopButton();
+    updateMenu();
+    updateSettingsBlock();
+  });
+  // Esc 收起二级菜单（面板整体的收起仍走鼠标离开）
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !quickState.menuOpen) return;
+    event.preventDefault();
+    Promise.resolve(window.sessionHudAPI.setMenuOpen(false)).catch(() => {});
   });
 
-  i18nPayload = await window.sessionHudAPI.getI18n() || i18nPayload;
-  render();
-  setInterval(updateElapsedLabels, 1000);
+  try {
+    i18nPayload = (await window.sessionHudAPI.getI18n()) || i18nPayload;
+  } catch (err) {
+    console.warn("load i18n threw:", err);
+  }
+  i18nReady = true;
+  refreshTexts();
 }
 
-init().catch((err) => {
-  hudEl.textContent = err && err.message ? err.message : String(err);
-});
+if (window.sessionHudAPI) {
+  init().catch((err) => {
+    console.warn("session hud renderer init failed:", err);
+  });
+} else {
+  console.warn("session hud renderer: preload API 不可用（缺 window.sessionHudAPI）");
+}

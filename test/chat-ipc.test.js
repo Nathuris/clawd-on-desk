@@ -15,7 +15,8 @@
 //     非图片 / 超 8MB / 损坏 base64 整张拒绝；
 //   - 外链（chat:open-external）：只放行 http(s)，其余协议不调用 shell；
 //   - 权限确认不再走窗口内卡片：chat:permission-decision 通道已移除；
-//   - 旧的 dialog 版 createPermissionConfirmer 已从模块导出与返回对象中移除。
+//   - 旧的 dialog 版 createPermissionConfirmer 已从模块导出与返回对象中移除；
+//   - 悬停面板排队器的清理钩子：onUserStop / onContextReset 必须在 runtime 调用前触发。
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -231,7 +232,9 @@ function createHarness(overrides = {}) {
   };
 
   const getChatWindow = overrides.getChatWindow || (() => chatWindow);
-  const runtime = registerChatIpc({
+  // 排队清理钩子（main.js 注入）按需接线：缺省不给，覆盖「未注入不炸」的形态；
+  // 时序用例自己传钩子进来，把钩子与 runtime 调用记进同一个数组比先后。
+  const registerOptions = {
     ipcMain,
     getChatWindow,
     chatRuntime,
@@ -244,7 +247,10 @@ function createHarness(overrides = {}) {
     loadBackfill,
     app,
     shell,
-  });
+  };
+  if (typeof overrides.onUserStop === "function") registerOptions.onUserStop = overrides.onUserStop;
+  if (typeof overrides.onContextReset === "function") registerOptions.onContextReset = overrides.onContextReset;
+  const runtime = registerChatIpc(registerOptions);
   return {
     ipcMain,
     runtime,
@@ -994,4 +1000,124 @@ test("chat:open-external reports an error when the shell refuses to open the lin
   });
   const result = await harness.ipcMain.invoke("chat:open-external", { url: "https://example.com" });
   assert.equal(result.status, "error");
+});
+
+// ── 悬停面板排队器的清理钩子（阶段一）──
+//
+// chat-ipc 只负责在正确时机喊一嗓子：用户停止 = 清队（onUserStop），
+// 换上下文（新会话 / 恢复 / 换目录）= 按 reason 清队（onContextReset）。
+// 全部必须在 runtime 调用【之前】触发——runtime 一旦动手，状态边沿就到了。
+
+// 时序断言用的装配：钩子与 runtime 调用记进同一个 events 数组，谁先谁后一目了然。
+function createHookHarness({ dialogResult, resumeTarget, cwd = "/tmp/chat-project" } = {}) {
+  const events = [];
+  const state = {
+    status: "idle", sessionId: null, cwd,
+    effort: "medium", permissionMode: "acceptEdits", model: null, busy: false, messages: [],
+  };
+  const harness = createHarness({
+    state,
+    onUserStop: () => events.push(["onUserStop"]),
+    onContextReset: (reason) => events.push(["onContextReset", reason]),
+    dialog: {
+      showOpenDialog: async () => dialogResult ?? { canceled: false, filePaths: [path.join("/tmp", "chat-project")] },
+    },
+    resolveResumeTarget: resumeTarget
+      || ((agentId, key) => ({ agentId, sessionId: "sess-9", historyKey: key, cwd })),
+    chatRuntime: {
+      getState: () => state,
+      stop: () => { events.push(["runtime.stop"]); return { status: "ok" }; },
+      newSession: () => { events.push(["runtime.newSession"]); return { status: "ok" }; },
+      setWorkingDir: (dir) => { events.push(["runtime.setWorkingDir", dir]); return { status: "ok" }; },
+      resumeSession: (args) => { events.push(["runtime.resumeSession", args]); return { status: "ok" }; },
+    },
+  });
+  return { ...harness, events };
+}
+
+test("chat:stop 先触发 onUserStop，再让 runtime 停下", async () => {
+  const { ipcMain, events } = createHookHarness();
+  await ipcMain.invoke("chat:stop");
+  // 先清队再 stop：stop 回到 idle 的边沿会放行排队消息，不清就发进被停掉的上下文。
+  assert.deepEqual(events, [["onUserStop"], ["runtime.stop"]]);
+});
+
+test("chat:new-session 在 runtime 开新会话之前触发 onContextReset(\"new-session\")", async () => {
+  const { ipcMain, events } = createHookHarness();
+  await ipcMain.invoke("chat:new-session");
+  assert.deepEqual(events, [["onContextReset", "new-session"], ["runtime.newSession"]]);
+});
+
+test("chat:pick-working-dir 换了目录才触发 onContextReset(\"dir-changed\")，且在 runtime 之前", async () => {
+  const dir = path.join("/tmp", "other-project");
+  const { ipcMain, events } = createHookHarness({
+    dialogResult: { canceled: false, filePaths: [dir] },
+  });
+  const result = await ipcMain.invoke("chat:pick-working-dir");
+  assert.equal(result.status, "ok");
+  assert.deepEqual(events, [["onContextReset", "dir-changed"], ["runtime.setWorkingDir", dir]]);
+});
+
+test("chat:pick-working-dir 重选同一目录不触发 dir-changed：不换上下文就不清队", async () => {
+  const { ipcMain, events } = createHookHarness();
+  const result = await ipcMain.invoke("chat:pick-working-dir");
+  assert.equal(result.status, "ok");
+  assert.deepEqual(events, [["runtime.setWorkingDir", "/tmp/chat-project"]]);
+});
+
+test("取消选目录不触发 dir-changed：没换上下文就不能清队", async () => {
+  const { ipcMain, events } = createHookHarness({ dialogResult: { canceled: true, filePaths: [] } });
+  const result = await ipcMain.invoke("chat:pick-working-dir");
+  assert.equal(result.status, "cancel");
+  assert.deepEqual(events, []);
+});
+
+test("chat:resume-session 恢复旧对话之前触发 onContextReset(\"resume\")", async () => {
+  const { ipcMain, events } = createHookHarness();
+  const result = await ipcMain.invoke("chat:resume-session", historyKey("a"));
+  assert.equal(result.status, "ok");
+  assert.deepEqual(events, [
+    ["onContextReset", "resume"],
+    ["runtime.resumeSession", { sessionId: "sess-9" }],
+  ]);
+});
+
+test("钩子未注入时 stop / 新会话 / 选目录 / 恢复照常工作", async () => {
+  const cwd = "/tmp/chat-project";
+  const { ipcMain, calls } = createHarness({
+    state: { cwd },
+    resolveResumeTarget: (agentId, key) => ({ agentId, sessionId: "sess-9", historyKey: key, cwd }),
+  });
+
+  await ipcMain.invoke("chat:stop");
+  await ipcMain.invoke("chat:new-session");
+  const picked = await ipcMain.invoke("chat:pick-working-dir");
+  assert.equal(picked.status, "ok");
+  const resumed = await ipcMain.invoke("chat:resume-session", historyKey("a"));
+  assert.equal(resumed.status, "ok");
+
+  assert.deepEqual(
+    calls.map(([name]) => name)
+      .filter((name) => ["stop", "newSession", "setWorkingDir", "resumeSession"].includes(name)),
+    ["stop", "newSession", "setWorkingDir", "resumeSession"],
+  );
+});
+
+test("钩子抛错也不能挡住 runtime 调用", async () => {
+  const events = [];
+  const state = { status: "idle", cwd: "/tmp/chat-project", messages: [] };
+  const { ipcMain } = createHarness({
+    state,
+    onUserStop: () => { throw new Error("queue exploded"); },
+    onContextReset: () => { throw new Error("queue exploded"); },
+    chatRuntime: {
+      getState: () => state,
+      stop: () => { events.push("stop"); return { status: "ok" }; },
+      newSession: () => { events.push("newSession"); return { status: "ok" }; },
+    },
+  });
+
+  await ipcMain.invoke("chat:stop");
+  await ipcMain.invoke("chat:new-session");
+  assert.deepEqual(events, ["stop", "newSession"]);
 });

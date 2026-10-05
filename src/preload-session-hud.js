@@ -2,14 +2,8 @@
 
 const { contextBridge, ipcRenderer } = require("electron");
 
-const snapshotListeners = new Set();
 const langListeners = new Set();
-
-ipcRenderer.on("session-hud:session-snapshot", (_event, snapshot) => {
-  for (const cb of snapshotListeners) {
-    try { cb(snapshot); } catch (err) { console.warn("session hud snapshot listener threw:", err); }
-  }
-});
+const quickStateListeners = new Set();
 
 ipcRenderer.on("session-hud:lang-change", (_event, payload) => {
   for (const cb of langListeners) {
@@ -17,21 +11,32 @@ ipcRenderer.on("session-hud:lang-change", (_event, payload) => {
   }
 });
 
+ipcRenderer.on("session-hud:quick-state", (_event, payload) => {
+  for (const cb of quickStateListeners) {
+    try { cb(payload); } catch (err) { console.warn("session hud quick-state listener threw:", err); }
+  }
+});
+
 contextBridge.exposeInMainWorld("sessionHudAPI", {
   getI18n: () => ipcRenderer.invoke("session-hud:get-i18n"),
-  focusSession: (sessionId) => ipcRenderer.send("session-hud:focus-session", sessionId),
-  openSessionFolder: (sessionId) => ipcRenderer.invoke("session-hud:open-session-folder", sessionId),
-  openDashboard: () => ipcRenderer.send("session-hud:open-dashboard"),
-  setPinned: (value) => ipcRenderer.send("session-hud:set-pinned", !!value),
-  ackCompletion: (sessionId) => ipcRenderer.invoke("session:ack-completion", sessionId),
-  onSessionSnapshot: (cb) => {
-    if (typeof cb !== "function") return () => {};
-    snapshotListeners.add(cb);
-    return () => snapshotListeners.delete(cb);
-  },
+  // 状态跟随 quick-state 推送，操作走 invoke（send-prompt 会花钱，
+  // 主进程侧有信任闸门），hold 用 send 因为不需要回执。
+  sendPrompt: (text) => ipcRenderer.invoke("session-hud:send-prompt", { text }),
+  setEffort: (value) => ipcRenderer.invoke("session-hud:set-effort", { value }),
+  setPermissionMode: (value) => ipcRenderer.invoke("session-hud:set-permission-mode", { value }),
+  pickWorkingDir: () => ipcRenderer.invoke("session-hud:pick-working-dir"),
+  stopChat: () => ipcRenderer.invoke("session-hud:stop-chat"),
+  // 二级菜单展开状态由主进程持有（窗口高度要跟着变）。
+  setMenuOpen: (open) => ipcRenderer.invoke("session-hud:set-menu-open", { open: !!open }),
+  setHold: (reason, held) => ipcRenderer.send("session-hud:set-hold", { reason, held }),
   onLangChange: (cb) => {
     if (typeof cb !== "function") return () => {};
     langListeners.add(cb);
     return () => langListeners.delete(cb);
+  },
+  onQuickState: (cb) => {
+    if (typeof cb !== "function") return () => {};
+    quickStateListeners.add(cb);
+    return () => quickStateListeners.delete(cb);
   },
 });

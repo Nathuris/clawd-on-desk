@@ -180,6 +180,18 @@ function registerChatIpc(options = {}) {
     ? options.resolveResumeTarget
     : null;
   const loadBackfill = typeof options.loadBackfill === "function" ? options.loadBackfill : null;
+  // 悬停面板排队器的清理钩子：用户点停止 / 换上下文（新会话、恢复、换目录）
+  // 时由主进程同步清队，防止排队消息发进已变的上下文（见 main.js）。
+  const onUserStop = typeof options.onUserStop === "function" ? options.onUserStop : null;
+  const onContextReset = typeof options.onContextReset === "function" ? options.onContextReset : null;
+
+  function notifyUserStop() {
+    if (onUserStop) { try { onUserStop(); } catch {} }
+  }
+
+  function notifyContextReset(reason) {
+    if (onContextReset) { try { onContextReset(reason); } catch {} }
+  }
   const disposers = [];
   const watchedWebContents = new WeakSet();
 
@@ -579,6 +591,8 @@ function registerChatIpc(options = {}) {
   handle("chat:stop", async (event) => {
     const rejected = rejectUntrustedChatEvent(event);
     if (rejected) return rejected;
+    // 先清队再 stop：stop 回到 idle 的边沿会触发排队器放行下一条。
+    notifyUserStop();
     await applyRuntimeCall("stop");
     return respondWithState();
   });
@@ -586,6 +600,7 @@ function registerChatIpc(options = {}) {
   handle("chat:new-session", async (event) => {
     const rejected = rejectUntrustedChatEvent(event);
     if (rejected) return rejected;
+    notifyContextReset("new-session");
     await applyRuntimeCall("newSession");
     return respondWithState();
   });
@@ -596,6 +611,8 @@ function registerChatIpc(options = {}) {
     if (!EFFORT_VALUES.includes(value)) {
       return { status: "error", message: `invalid effort "${value}"` };
     }
+    // setEffort 会重置会话上下文（开新会话）：面板排队消息属于旧上下文，先清。
+    notifyContextReset("effort-changed");
     await applyRuntimeCall("setEffort", value);
     return respondWithState();
   });
@@ -655,6 +672,8 @@ function registerChatIpc(options = {}) {
     } catch (err) {
       console.warn("Clawd: failed to persist chatLastWorkingDir:", err && err.message);
     }
+    // 重选同一目录不算换上下文（runtime 对同目录 no-op），不误清排队消息。
+    if (dir !== currentChatCwd()) notifyContextReset("dir-changed");
     await applyRuntimeCall("setWorkingDir", dir);
     return { status: "ok", path: dir, state: respondWithState() };
   });
@@ -728,6 +747,8 @@ function registerChatIpc(options = {}) {
       const args = { sessionId: target.sessionId };
       // 回填缝随参数转交 runtime（runtime 也可自带注入，两者等价）。
       if (loadBackfill) args.loadBackfill = loadBackfill;
+      // 恢复=换上下文：排队消息先清掉，避免发进刚恢复的旧对话。
+      notifyContextReset("resume");
       result = await chatRuntime.resumeSession(args);
     } catch (err) {
       console.warn("Clawd: chatRuntime.resumeSession failed:", err && err.message);

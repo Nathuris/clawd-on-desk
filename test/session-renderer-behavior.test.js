@@ -43,11 +43,20 @@ class FakeElement {
     this.listeners = new Map();
     this.textContent = "";
     this.title = "";
+    this.placeholder = "";
+    this.value = "";
+    this.innerHTML = "";
     this.hidden = false;
     this.disabled = false;
     this.style = {};
   }
   appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
+  removeChild(child) {
+    const index = this.children.indexOf(child);
+    if (index !== -1) this.children.splice(index, 1);
+    if (child) child.parentNode = null;
+    return child;
+  }
   replaceChildren(...children) {
     const document = this.ownerDocument;
     if (document && document.activeElement !== this && this.contains(document.activeElement)) {
@@ -65,9 +74,18 @@ class FakeElement {
     if (!this.listeners.has(name)) this.listeners.set(name, []);
     this.listeners.get(name).push(listener);
   }
-  async dispatch(name) {
-    const event = { stopPropagation() {}, preventDefault() {}, key: "" };
-    for (const listener of this.listeners.get(name) || []) await listener(event);
+  // 事件对象允许用例补充字段（Enter/isComposing/keyCode…），
+  // 同时记录 preventDefault，方便断言回车被渲染端接管。
+  async dispatch(name, event = {}) {
+    const composed = {
+      key: "",
+      defaultPrevented: false,
+      stopPropagation() {},
+      preventDefault() { this.defaultPrevented = true; },
+      ...event,
+    };
+    for (const listener of this.listeners.get(name) || []) await listener(composed);
+    return composed;
   }
   querySelector(selector) {
     if (!selector.startsWith(".")) return null;
@@ -87,10 +105,15 @@ class FakeElement {
   replaceWith() {}
   focus() { if (this.ownerDocument) this.ownerDocument.activeElement = this; }
   select() {}
+  // 真 DOM 的 <select> 一定有 options 集合（保留给可能带下拉的渲染端）。
+  get options() {
+    return this.children.filter((child) => child && child.tagName === "OPTION");
+  }
 }
 
 function createDocument(ids) {
   const elements = new Map(ids.map((id) => [id, new FakeElement("div")]));
+  const documentListeners = new Map();
   const document = {
     title: "",
     activeElement: null,
@@ -106,8 +129,27 @@ function createDocument(ids) {
     getElementById: (id) => elements.get(id) || null,
     querySelectorAll: () => [],
     contains: () => true,
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    // 文档级事件：Esc 收起二级菜单就挂在 document 上，需要能派发并记录 preventDefault。
+    addEventListener: (name, listener) => {
+      if (!documentListeners.has(name)) documentListeners.set(name, []);
+      documentListeners.get(name).push(listener);
+    },
+    removeEventListener: (name, listener) => {
+      const list = documentListeners.get(name) || [];
+      const index = list.indexOf(listener);
+      if (index !== -1) list.splice(index, 1);
+    },
+    dispatch: async (name, event = {}) => {
+      const composed = {
+        key: "",
+        defaultPrevented: false,
+        stopPropagation() {},
+        preventDefault() { this.defaultPrevented = true; },
+        ...event,
+      };
+      for (const listener of documentListeners.get(name) || []) await listener(composed);
+      return composed;
+    },
     elements,
   };
   document.body.ownerDocument = document;
@@ -170,6 +212,66 @@ function translations() {
     dashboardModel: "Model",
   };
 }
+
+// 快捷面板（输入块 + 设置块）渲染端要用的文案。
+function hudTranslations(overrides = {}) {
+  return {
+    hudQuickPlaceholder: "Type a message, Enter to send…",
+    hudQuickStatusIdle: "Idle",
+    hudQuickStatusWorking: "Working",
+    hudQuickStatusError: "Error",
+    hudQuickQueued: "{n} queued",
+    hudQuickNoCwd: "Pick a working folder first",
+    hudQuickPickFolder: "Pick folder…",
+    hudQuickStop: "Stop",
+    hudQuickSendFailed: "Send failed",
+    hudQuickQueueFull: "Queue full",
+    chatEffortLabel: "Effort",
+    chatModeLabel: "Permission mode",
+    chatEffortLow: "Low",
+    chatEffortMedium: "Medium",
+    chatEffortHigh: "High",
+    chatEffortXhigh: "Very high",
+    chatEffortMax: "Max",
+    chatModeDefault: "Manual",
+    chatModeAcceptEdits: "Auto-edit",
+    chatModePlan: "Plan",
+    chatModeAuto: "Auto",
+    chatModeDefaultDesc: "Asks before risky operations do",
+    chatModeAcceptEditsDesc: "File edits go through, the rest still asks",
+    chatModePlanDesc: "Plans only — runs nothing",
+    chatModeAutoDesc: "A model classifier approves actions",
+    ...overrides,
+  };
+}
+
+const HUD_ZH_TRANSLATIONS = hudTranslations({
+  hudQuickPlaceholder: "输入消息，回车发送…",
+  hudQuickStatusIdle: "空闲",
+  hudQuickStatusWorking: "工作中",
+  hudQuickStatusError: "出错",
+  hudQuickQueued: "已排队 {n}",
+  hudQuickNoCwd: "先选择工作文件夹",
+  hudQuickPickFolder: "选文件夹…",
+  hudQuickStop: "停止",
+  hudQuickSendFailed: "发送失败",
+  hudQuickQueueFull: "队列已满",
+  chatEffortLabel: "强度",
+  chatModeLabel: "权限模式",
+  chatEffortLow: "低",
+  chatEffortMedium: "中",
+  chatEffortHigh: "高",
+  chatEffortXhigh: "很高",
+  chatEffortMax: "最大",
+  chatModeDefault: "手动",
+  chatModeAcceptEdits: "自动编辑",
+  chatModePlan: "计划",
+  chatModeAuto: "自动",
+  chatModeDefaultDesc: "危险操作前会先询问你",
+  chatModeAcceptEditsDesc: "文件修改自动放行，其余仍会询问",
+  chatModePlanDesc: "只做方案，不执行任何操作",
+  chatModeAutoDesc: "由模型自动判断并放行",
+});
 
 function session(id, overrides = {}) {
   return {
@@ -270,46 +372,113 @@ async function loadDashboard(
   };
 }
 
-async function loadHud(sessions, openResult = { status: "ok" }) {
+// 加载整块快捷面板（单窗口，不再有 ?block= 分支）。
+// preload 暴露的 API 全部给出假实现并记录调用；setTimeout 换成假计时器，
+// 便于断言 4 秒提示的消失时机；document 级事件可派发，用于测 Esc。
+async function loadHud(options = {}) {
   const document = createDocument(["hud"]);
-  const openCalls = [];
-  let snapshotListener = null;
-  let feedbackTimeout = null;
-  const api = {
-    onLangChange: () => {},
-    onSessionSnapshot: (listener) => { snapshotListener = listener; },
-    getI18n: async () => ({ lang: "en", translations: translations() }),
-    openSessionFolder: async (...args) => {
-      openCalls.push(args);
-      return typeof openResult === "function" ? openResult(...args) : openResult;
-    },
-    focusSession: () => {},
-    ackCompletion: async () => ({ status: "noop" }),
-    openDashboard: () => {},
-    setPinned: () => {},
+  const calls = {
+    sendPrompt: [],
+    setEffort: [],
+    setPermissionMode: [],
+    setMenuOpen: [],
+    pickWorkingDir: 0,
+    stopChat: 0,
+    setHold: [],
   };
+  const warnings = [];
+  const timers = new Map();
+  let timerSeq = 0;
+  let langListener = null;
+  let quickListener = null;
+  const i18nPayload = options.i18n || { lang: "en", translations: hudTranslations() };
+
+  const api = {
+    getI18n: async () => i18nPayload,
+    onLangChange: (listener) => { langListener = listener; },
+    onQuickState: (listener) => { quickListener = listener; },
+    sendPrompt: async (text) => {
+      calls.sendPrompt.push(text);
+      if (options.sendPromptThrows) throw new Error("send failed");
+      return typeof options.sendPromptResult === "function"
+        ? options.sendPromptResult(text)
+        : (options.sendPromptResult || { status: "ok" });
+    },
+    setEffort: async (value) => {
+      calls.setEffort.push(value);
+      if (options.setEffortThrows) throw new Error("set effort failed");
+      return typeof options.setEffortResult === "function"
+        ? options.setEffortResult(value)
+        : (options.setEffortResult || { status: "ok" });
+    },
+    setPermissionMode: async (value) => {
+      calls.setPermissionMode.push(value);
+      if (options.setPermissionModeThrows) throw new Error("set permission mode failed");
+      return typeof options.setPermissionModeResult === "function"
+        ? options.setPermissionModeResult(value)
+        : (options.setPermissionModeResult || { status: "ok" });
+    },
+    setMenuOpen: async (open) => {
+      calls.setMenuOpen.push(open);
+      if (options.setMenuOpenThrows) throw new Error("set menu open failed");
+      return options.setMenuOpenResult || { status: "ok" };
+    },
+    pickWorkingDir: async () => {
+      calls.pickWorkingDir += 1;
+      return options.pickWorkingDirResult || { status: "canceled" };
+    },
+    stopChat: async () => {
+      calls.stopChat += 1;
+      return { status: "ok" };
+    },
+    setHold: (reason, held) => { calls.setHold.push([reason, held]); },
+  };
+
   const context = vm.createContext({
-    window: { sessionHudAPI: api }, document, console, Date,
-    setInterval: () => 0,
-    setTimeout: (callback) => { feedbackTimeout = callback; return 1; },
-    clearTimeout: () => { feedbackTimeout = null; },
+    window: { sessionHudAPI: api },
+    document,
+    console: {
+      log: (...args) => warnings.push(["log", ...args]),
+      warn: (...args) => warnings.push(["warn", ...args]),
+      error: (...args) => warnings.push(["error", ...args]),
+    },
+    Date,
+    setTimeout: (callback, delay) => {
+      const id = ++timerSeq;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout: (id) => { timers.delete(id); },
   });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "src", "session-focus-unavailable.js"), "utf8"), context);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "src", "session-hud-renderer.js"), "utf8"), context);
+  vm.runInContext(
+    fs.readFileSync(path.join(__dirname, "..", "src", "session-hud-renderer.js"), "utf8"),
+    context
+  );
   await flush();
-  snapshotListener({ sessions, orderedIds: sessions.map((entry) => entry.id) });
+
+  const root = document.elements.get("hud");
+  const find = (className) => byClass(root, className);
   return {
-    root: document.elements.get("hud"),
-    openCalls,
-    pushSnapshot: (nextSessions = sessions) => snapshotListener({
-      sessions: nextSessions,
-      orderedIds: nextSessions.map((entry) => entry.id),
-    }),
-    expireFeedback: async () => {
-      const callback = feedbackTimeout;
-      feedbackTimeout = null;
-      if (callback) callback();
-      await flush();
+    document,
+    root,
+    calls,
+    warnings,
+    find,
+    one: (className) => find(className)[0] || null,
+    byTag: (tagName) => descendants(root).filter((el) => el.tagName === String(tagName).toUpperCase()),
+    pushQuickState: (state) => {
+      assert.strictEqual(typeof quickListener, "function", "renderer must register onQuickState");
+      quickListener(state);
+    },
+    pushLang: (payload) => {
+      assert.strictEqual(typeof langListener, "function", "renderer must register onLangChange");
+      langListener(payload);
+    },
+    pendingTimerDelays: () => [...timers.values()].map((timer) => timer.delay),
+    fireTimers: () => {
+      const pending = [...timers.values()];
+      timers.clear();
+      for (const timer of pending) timer.callback();
     },
   };
 }
@@ -681,64 +850,369 @@ test("Dashboard keeps session automation failure feedback visible after rerender
   );
 });
 
-test("HUD unfocusable click explains why and offers folder only for local non-webui", async () => {
-  const { root } = await loadHud([
-    session("local"),
-    session("remote", { sourceType: "ssh", host: "host" }),
-    session("webui", { platform: "webui" }),
+/* ===== 快捷面板：单窗口整卡结构 ===== */
+
+test("quick panel: idle default shows Idle, hides the stop button and has no selects", async () => {
+  const hud = await loadHud();
+  assert.strictEqual(hud.one("quick-status-text").textContent, "Idle");
+  assert.strictEqual(hud.one("quick-status-text").classList.contains("is-error"), false);
+  assert.strictEqual(hud.one("quick-input").placeholder, "Type a message, Enter to send…");
+  assert.strictEqual(hud.one("quick-stop-btn").style.display, "none");
+  assert.strictEqual(hud.one("quick-stop-btn").getAttribute("aria-label"), "Stop");
+  assert.strictEqual(hud.find("quick-card").length, 1, "one card holds the whole panel");
+  assert.strictEqual(hud.byTag("select").length, 0, "the old two-select layout is gone");
+});
+
+test("quick panel: builds status / level / menu / folder / input rows in order", async () => {
+  const hud = await loadHud();
+  const card = hud.one("quick-card");
+  assert.deepStrictEqual(card.children.map((child) => child.className), [
+    "quick-status-row",
+    "quick-level-btn",
+    "quick-menu",
+    "quick-folder-btn",
+    "quick-input-row",
   ]);
-  const rows = byClass(root, "row-unfocusable");
-  assert.deepStrictEqual(rows.map((row) => row.title), [
-    "This session did not provide terminal window information.",
-    "Remote sessions cannot focus a terminal on this computer.",
-    "WebUI sessions do not have a local terminal window.",
-  ]);
-  await rows[0].dispatch("click");
-  assert.strictEqual(
-    byClass(root, "session-inline-feedback")[0].textContent,
-    "This session did not provide terminal window information."
+  assert.strictEqual(hud.find("quick-level-label").length, 1);
+  assert.strictEqual(hud.find("quick-level-caret").length, 1);
+  assert.strictEqual(hud.one("quick-folder-label").textContent, "Pick folder…");
+});
+
+test("quick panel: the menu lists four modes with names and descriptions plus the effort slider", async () => {
+  const hud = await loadHud();
+  const options = hud.find("quick-mode-option");
+  assert.strictEqual(options.length, 4);
+  assert.deepStrictEqual(
+    options.map((el) => byClass(el, "quick-mode-name")[0].textContent),
+    ["Manual", "Auto-edit", "Plan", "Auto"]
   );
-  assert.strictEqual(byClass(root, "open-folder-button").length, 1);
+  assert.deepStrictEqual(
+    options.map((el) => byClass(el, "quick-mode-desc")[0].textContent),
+    [
+      "Asks before risky operations do",
+      "File edits go through, the rest still asks",
+      "Plans only — runs nothing",
+      "A model classifier approves actions",
+    ]
+  );
+  const range = hud.one("quick-effort-range");
+  assert.strictEqual(range.type, "range");
+  assert.strictEqual(range.min, "0");
+  assert.strictEqual(range.max, "4");
+  assert.strictEqual(range.step, "1");
+  assert.strictEqual(range.value, "1", "medium is the default effort");
+  assert.strictEqual(hud.one("quick-effort-label").textContent, "Effort");
+  assert.strictEqual(hud.one("quick-effort-value").textContent, "Medium");
+  assert.strictEqual(range.getAttribute("aria-label"), "Effort");
 });
 
-test("HUD folder click sends only id and exposes open failure", async () => {
-  const { root, openCalls } = await loadHud([session("local")], { status: "not-available" });
-  await byClass(root, "open-folder-button")[0].dispatch("click");
-  assert.deepStrictEqual(openCalls, [["local"]]);
-  assert.strictEqual(byClass(root, "session-inline-feedback")[0].textContent, "This folder is no longer available.");
+test("quick panel: menuOpen follows the pushed state on the body class", async () => {
+  const hud = await loadHud();
+  assert.strictEqual(hud.document.body.classList.contains("menu-open"), false);
+  hud.pushQuickState({ menuOpen: true });
+  assert.strictEqual(hud.document.body.classList.contains("menu-open"), true);
+  hud.pushQuickState({ menuOpen: false });
+  assert.strictEqual(hud.document.body.classList.contains("menu-open"), false);
 });
 
-test("HUD preserves folder pending state across snapshot renders", async () => {
-  let resolveOpen;
-  const pendingResult = new Promise((resolve) => { resolveOpen = resolve; });
-  const harness = await loadHud([session("local")], () => pendingResult);
+test("quick panel: the level button reads mode · effort and toggles the menu", async () => {
+  const hud = await loadHud();
+  hud.pushQuickState({ permissionMode: "auto", effort: "high" });
+  const button = hud.one("quick-level-btn");
+  assert.strictEqual(hud.one("quick-level-label").textContent, "Auto · High");
+  assert.strictEqual(button.getAttribute("aria-label"), "Permission mode · Effort");
+  assert.strictEqual(button.title, "Permission mode · Effort");
 
-  const clickPromise = byClass(harness.root, "open-folder-button")[0].dispatch("click");
+  await button.dispatch("click");
+  assert.deepStrictEqual(hud.calls.setMenuOpen, [true]);
+  hud.pushQuickState({ menuOpen: true });
+  await button.dispatch("click");
+  assert.deepStrictEqual(hud.calls.setMenuOpen, [true, false]);
+});
+
+test("quick panel: the active mode follows state and picking a mode sends setPermissionMode", async () => {
+  const hud = await loadHud();
+  hud.pushQuickState({ permissionMode: "plan" });
+  const options = hud.find("quick-mode-option");
+  const active = () => options.filter((el) => el.classList.contains("is-active"));
+  assert.strictEqual(active().length, 1);
+  assert.strictEqual(byClass(active()[0], "quick-mode-name")[0].textContent, "Plan");
+
+  await options[3].dispatch("click");
+  assert.deepStrictEqual(hud.calls.setPermissionMode, ["auto"]);
+  // 点当前项不发请求，高亮也仍只由状态推送驱动
+  await options[2].dispatch("click");
+  assert.deepStrictEqual(hud.calls.setPermissionMode, ["auto"]);
+  assert.strictEqual(active().length, 1);
+  assert.strictEqual(byClass(active()[0], "quick-mode-name")[0].textContent, "Plan");
+});
+
+test("quick panel: a failed mode pick leaves the highlight untouched", async () => {
+  const hud = await loadHud({ setPermissionModeResult: { status: "error" } });
+  hud.pushQuickState({ permissionMode: "plan" });
+  const options = hud.find("quick-mode-option");
+  await options[3].dispatch("click");
   await flush();
-  harness.pushSnapshot();
-
-  const replacementButton = byClass(harness.root, "open-folder-button")[0];
-  assert.strictEqual(replacementButton.disabled, true);
-  await replacementButton.dispatch("click");
-  assert.deepStrictEqual(harness.openCalls, [["local"]]);
-
-  resolveOpen({ status: "ok" });
-  await clickPromise;
-  assert.strictEqual(byClass(harness.root, "open-folder-button")[0].disabled, false);
+  assert.deepStrictEqual(hud.calls.setPermissionMode, ["auto"]);
+  const active = options.filter((el) => el.classList.contains("is-active"));
+  assert.strictEqual(active.length, 1);
+  assert.strictEqual(byClass(active[0], "quick-mode-name")[0].textContent, "Plan");
+  assert.ok(hud.warnings.some(([level]) => level === "warn"));
 });
 
-test("HUD feedback survives snapshot renders and clears on its timeout", async () => {
-  const harness = await loadHud([session("local")]);
-  await byClass(harness.root, "row-unfocusable")[0].dispatch("click");
-  harness.pushSnapshot();
-  assert.strictEqual(
-    byClass(harness.root, "session-inline-feedback")[0].textContent,
-    "This session did not provide terminal window information."
-  );
+test("quick panel: the slider follows effort and locks while busy or queued", async () => {
+  const hud = await loadHud();
+  const range = hud.one("quick-effort-range");
+  assert.strictEqual(range.value, "1");
+  hud.pushQuickState({ effort: "xhigh" });
+  assert.strictEqual(range.value, "3");
+  assert.strictEqual(hud.one("quick-effort-value").textContent, "Very high");
 
-  await harness.expireFeedback();
-  assert.strictEqual(byClass(harness.root, "session-inline-feedback").length, 0);
-  assert.strictEqual(byClass(harness.root, "title")[0].textContent, "local");
+  hud.pushQuickState({ busy: true });
+  assert.strictEqual(range.disabled, true);
+  hud.pushQuickState({ busy: false, queuedCount: 2 });
+  assert.strictEqual(range.disabled, true);
+  hud.pushQuickState({ busy: false, queuedCount: 0 });
+  assert.strictEqual(range.disabled, false);
+});
+
+test("quick panel: sliding updates only the label, releasing commits setEffort", async () => {
+  const hud = await loadHud();
+  const range = hud.one("quick-effort-range");
+  range.value = "4";
+  await range.dispatch("input");
+  assert.deepStrictEqual(hud.calls.setEffort, [], "dragging never sends a request");
+  assert.strictEqual(hud.one("quick-effort-value").textContent, "Max");
+
+  await range.dispatch("change");
+  await flush();
+  assert.deepStrictEqual(hud.calls.setEffort, ["max"]);
+
+  // 生效值没变就不重复发
+  hud.pushQuickState({ effort: "max" });
+  await range.dispatch("change");
+  await flush();
+  assert.deepStrictEqual(hud.calls.setEffort, ["max"]);
+});
+
+test("quick panel: a push during a drag cannot move the thumb and a failed commit rolls back", async () => {
+  const dragging = await loadHud();
+  const dragRange = dragging.one("quick-effort-range");
+  dragRange.value = "4";
+  await dragRange.dispatch("input");
+  dragging.pushQuickState({ effort: "low" });
+  assert.strictEqual(dragRange.value, "4", "a push mid-drag must not steal the slider");
+  assert.strictEqual(dragging.one("quick-effort-value").textContent, "Max");
+  await dragRange.dispatch("change");
+  await flush();
+  assert.deepStrictEqual(dragging.calls.setEffort, ["max"]);
+
+  const failing = await loadHud({ setEffortResult: { status: "error" } });
+  const failRange = failing.one("quick-effort-range");
+  failRange.value = "2";
+  await failRange.dispatch("input");
+  await failRange.dispatch("change");
+  await flush();
+  assert.deepStrictEqual(failing.calls.setEffort, ["high"]);
+  assert.strictEqual(failRange.value, "1", "a failed commit rolls the thumb back");
+  assert.strictEqual(failing.one("quick-effort-value").textContent, "Medium");
+  assert.ok(failing.warnings.some(([level]) => level === "warn"));
+});
+
+test("quick panel: Escape closes an open menu only", async () => {
+  const hud = await loadHud();
+  await hud.document.dispatch("keydown", { key: "Escape" });
+  assert.deepStrictEqual(hud.calls.setMenuOpen, [], "a closed menu ignores Escape");
+
+  hud.pushQuickState({ menuOpen: true });
+  const event = await hud.document.dispatch("keydown", { key: "Escape" });
+  await flush();
+  assert.deepStrictEqual(hud.calls.setMenuOpen, [false]);
+  assert.strictEqual(event.defaultPrevented, true);
+});
+
+/* ===== 快捷面板：菜单开合过渡跑完的回报 ===== */
+
+/* ===== 快捷面板：状态行与输入行 ===== */
+
+test("quick panel: busy shows Working with the queue count and a stop button that stops chat", async () => {
+  const hud = await loadHud();
+  hud.pushQuickState({ busy: true, queuedCount: 2 });
+  assert.strictEqual(hud.one("quick-status-text").textContent, "Working · 2 queued");
+  const stopButton = hud.one("quick-stop-btn");
+  assert.strictEqual(stopButton.style.display, "");
+  await stopButton.dispatch("click");
+  assert.strictEqual(hud.calls.stopChat, 1);
+
+  hud.pushQuickState({ busy: false, queuedCount: 0 });
+  assert.strictEqual(hud.one("quick-status-text").textContent, "Idle");
+  assert.strictEqual(hud.one("quick-stop-btn").style.display, "none");
+});
+
+test("quick panel: a missing working folder blocks sending with its own copy", async () => {
+  const hud = await loadHud();
+  hud.pushQuickState({ blocked: "no-cwd" });
+  assert.strictEqual(hud.one("quick-status-text").textContent, "Pick a working folder first");
+});
+
+test("quick panel: an error status paints the Error copy", async () => {
+  const hud = await loadHud();
+  hud.pushQuickState({ status: "error" });
+  assert.strictEqual(hud.one("quick-status-text").textContent, "Error");
+  assert.strictEqual(hud.one("quick-status-text").classList.contains("is-error"), true);
+});
+
+test("quick panel: Enter sends, an accepted prompt clears the field and releases the draft hold", async () => {
+  const hud = await loadHud();
+  const input = hud.one("quick-input");
+  input.value = "hi";
+  const event = await input.dispatch("keydown", { key: "Enter" });
+  assert.strictEqual(event.defaultPrevented, true);
+  await flush();
+  assert.deepStrictEqual(hud.calls.sendPrompt, ["hi"]);
+  assert.strictEqual(input.value, "");
+  assert.deepStrictEqual(hud.calls.setHold, [["draft", false]]);
+});
+
+test("quick panel: a queued prompt clears the field just like an accepted one", async () => {
+  const hud = await loadHud({ sendPromptResult: { status: "queued" } });
+  const input = hud.one("quick-input");
+  input.value = "hi";
+  await input.dispatch("keydown", { key: "Enter" });
+  await flush();
+  assert.deepStrictEqual(hud.calls.sendPrompt, ["hi"]);
+  assert.strictEqual(input.value, "");
+  assert.deepStrictEqual(hud.calls.setHold, [["draft", false]]);
+});
+
+test("quick panel: a full queue keeps the text and the notice clears after the 4s timer", async () => {
+  const hud = await loadHud({ sendPromptResult: { status: "full" } });
+  const input = hud.one("quick-input");
+  input.value = "hi";
+  await input.dispatch("keydown", { key: "Enter" });
+  await flush();
+  assert.strictEqual(hud.one("quick-status-text").textContent, "Queue full");
+  assert.strictEqual(hud.one("quick-status-text").classList.contains("is-error"), true);
+  assert.strictEqual(input.value, "hi");
+  assert.deepStrictEqual(hud.pendingTimerDelays(), [4000]);
+  hud.fireTimers();
+  assert.strictEqual(hud.one("quick-status-text").textContent, "Idle");
+  assert.strictEqual(hud.one("quick-status-text").classList.contains("is-error"), false);
+  assert.strictEqual(input.value, "hi");
+});
+
+test("quick panel: a failed send keeps the text and shows the failure notice", async () => {
+  const rejected = await loadHud({ sendPromptResult: { status: "error" } });
+  const rejectedInput = rejected.one("quick-input");
+  rejectedInput.value = "hi";
+  await rejectedInput.dispatch("keydown", { key: "Enter" });
+  await flush();
+  assert.strictEqual(rejected.one("quick-status-text").textContent, "Send failed");
+  assert.strictEqual(rejectedInput.value, "hi");
+
+  const thrown = await loadHud({ sendPromptThrows: true });
+  const thrownInput = thrown.one("quick-input");
+  thrownInput.value = "hi";
+  await thrownInput.dispatch("keydown", { key: "Enter" });
+  await flush();
+  assert.strictEqual(thrown.one("quick-status-text").textContent, "Send failed");
+  assert.strictEqual(thrownInput.value, "hi");
+  assert.ok(
+    thrown.warnings.some(([level]) => level === "warn"),
+    "a thrown send is caught and logged"
+  );
+});
+
+test("quick panel: IME composition Enter never sends", async () => {
+  const hud = await loadHud();
+  const input = hud.one("quick-input");
+  input.value = "hi";
+  await input.dispatch("keydown", { key: "Enter", isComposing: true });
+  await input.dispatch("keydown", { key: "Enter", keyCode: 229 });
+  assert.deepStrictEqual(hud.calls.sendPrompt, []);
+  await input.dispatch("keydown", { key: "Enter" });
+  await flush();
+  assert.deepStrictEqual(hud.calls.sendPrompt, ["hi"], "a plain Enter still sends");
+});
+
+test("quick panel: blank and whitespace-only drafts are never sent", async () => {
+  const hud = await loadHud();
+  const input = hud.one("quick-input");
+  input.value = "   ";
+  await input.dispatch("keydown", { key: "Enter" });
+  input.value = "";
+  await input.dispatch("keydown", { key: "Enter" });
+  assert.deepStrictEqual(hud.calls.sendPrompt, []);
+});
+
+test("quick panel: focus and draft holds follow focus and input emptiness", async () => {
+  const hud = await loadHud();
+  const input = hud.one("quick-input");
+  await input.dispatch("focus");
+  await input.dispatch("blur");
+  input.value = "draft";
+  await input.dispatch("input");
+  input.value = "";
+  await input.dispatch("input");
+  assert.deepStrictEqual(hud.calls.setHold, [
+    ["focus", true],
+    ["focus", false],
+    ["draft", true],
+    ["draft", false],
+  ]);
+});
+
+test("quick panel: the folder button shows the cwd name and fires pickWorkingDir", async () => {
+  const hud = await loadHud();
+  const button = hud.one("quick-folder-btn");
+  const label = hud.one("quick-folder-label");
+  assert.strictEqual(label.textContent, "Pick folder…");
+  hud.pushQuickState({ hasCwd: true, cwdName: "my-project" });
+  assert.strictEqual(label.textContent, "my-project");
+  assert.strictEqual(button.title, "my-project");
+  hud.pushQuickState({ hasCwd: false, cwdName: null });
+  assert.strictEqual(label.textContent, "Pick folder…");
+
+  await button.dispatch("click");
+  assert.strictEqual(hud.calls.pickWorkingDir, 1);
+});
+
+/* ===== 快捷面板：语言切换 ===== */
+
+test("quick panel: a language push re-labels every node without rebuilding it", async () => {
+  const hud = await loadHud();
+  const input = hud.one("quick-input");
+  const levelButton = hud.one("quick-level-btn");
+  const range = hud.one("quick-effort-range");
+  const modeOptions = hud.find("quick-mode-option");
+  input.value = "draft text";
+  hud.pushQuickState({ permissionMode: "auto", effort: "high" });
+
+  hud.pushLang({ lang: "zh", translations: HUD_ZH_TRANSLATIONS });
+
+  assert.strictEqual(hud.one("quick-input"), input, "the input node is reused");
+  assert.strictEqual(hud.one("quick-level-btn"), levelButton, "the level button is reused");
+  assert.strictEqual(hud.one("quick-effort-range"), range, "the slider is reused");
+  hud.find("quick-mode-option").forEach((el, index) => {
+    assert.strictEqual(el, modeOptions[index], "mode rows are reused");
+  });
+  assert.strictEqual(input.value, "draft text", "the draft survives the language change");
+  assert.strictEqual(input.placeholder, "输入消息，回车发送…");
+  assert.strictEqual(hud.one("quick-status-text").textContent, "空闲");
+  assert.strictEqual(hud.one("quick-stop-btn").getAttribute("aria-label"), "停止");
+  assert.strictEqual(hud.one("quick-level-label").textContent, "自动 · 高");
+  assert.strictEqual(levelButton.getAttribute("aria-label"), "权限模式 · 强度");
+  assert.deepStrictEqual(
+    hud.find("quick-mode-option").map((el) => byClass(el, "quick-mode-name")[0].textContent),
+    ["手动", "自动编辑", "计划", "自动"]
+  );
+  assert.deepStrictEqual(
+    hud.find("quick-mode-option").map((el) => byClass(el, "quick-mode-desc")[0].textContent),
+    ["危险操作前会先询问你", "文件修改自动放行，其余仍会询问", "只做方案，不执行任何操作", "由模型自动判断并放行"]
+  );
+  assert.strictEqual(hud.one("quick-effort-label").textContent, "强度");
+  assert.strictEqual(hud.one("quick-effort-value").textContent, "高");
+  assert.strictEqual(range.getAttribute("aria-label"), "强度");
 });
 
 test("unfocusable and folder feedback copy exists in all supported languages", () => {

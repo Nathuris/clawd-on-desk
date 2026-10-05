@@ -13,10 +13,7 @@
   --text: #242427;
   --text-muted: #6b6b70;
   --shadow: rgba(0, 0, 0, 0.16);
-  --running: #16a34a;
-  --done: #2563eb;
   --interrupted: #d97706;
-  --idle: #9ca3af;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -26,14 +23,14 @@
     --text: #f4f4f5;
     --text-muted: #a1a1aa;
     --shadow: rgba(0, 0, 0, 0.34);
-    --done: #60a5fa;
-    --idle: #71717a;
   }
 }
 
 html, body {
   width: 100%;
+  height: 100%;
   margin: 0;
+  overflow: hidden;
   background: transparent;
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
@@ -42,303 +39,342 @@ html, body {
   user-select: none;
 }
 
-html, body { height: 100%; overflow: hidden; }
-body { padding: 2px 3px 8px; }
+/* 窗口壳：主进程按「卡片 + 壳」算窗口尺寸，这里的数字必须和主进程一致。
+   底部 30px 净空给 macOS 输入法候选窗——那块区域完全透明、不放任何东西。 */
+body { padding: 2px 3px 30px; }
 
-.hud {
-  width: 100%;
+/* 卡片贴底排列：展开时窗口向上变大，卡片底边因此钉住不动，只往上长。 */
+#hud {
   height: 100%;
   display: flex;
+  align-items: flex-end;
+}
+
+/* 卡片：宽度由窗口撑满（300px 卡片 + 左右各 3px 壳 = 306px 窗口） */
+.quick-card {
+  width: 100%;
+  display: flex;
   flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
   border: 1px solid var(--hud-border);
   border-radius: 8px;
   background: var(--hud-bg);
   box-shadow: 0 8px 18px -12px var(--shadow), 0 2px 4px rgba(0, 0, 0, 0.10);
   overflow: hidden;
-  position: relative;
-}
-
-.hud.has-pin .row {
-  padding-right: 28px;
-}
-
-.pin-btn {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  z-index: 2;
-  opacity: 0.55;
-  transition: opacity 100ms ease, background 100ms ease, color 100ms ease;
-}
-
-.pin-btn:hover {
-  opacity: 1;
-  background: rgba(0, 0, 0, 0.06);
-}
-
-.pin-btn.pinned {
-  opacity: 1;
-  color: #f59e0b;
-}
-
-@media (prefers-color-scheme: dark) {
-  .pin-btn:hover {
-    background: rgba(255, 255, 255, 0.10);
-  }
-}
-
-.row {
-  height: 28px;
-  flex: 0 0 28px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  cursor: pointer;
-  transition: background 80ms ease;
-}
-
-.row-unfocusable {
-  cursor: default;
-}
-
-.row:hover {
-  background: rgba(0, 0, 0, 0.06);
-}
-
-@media (prefers-color-scheme: dark) {
-  .row:hover {
-    background: rgba(255, 255, 255, 0.08);
-  }
-}
-
-.row:active {
-  background: rgba(0, 0, 0, 0.10);
-}
-
-@media (prefers-color-scheme: dark) {
-  .row:active {
-    background: rgba(255, 255, 255, 0.12);
-  }
-}
-
-.row .left {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-  background: var(--idle);
-}
-
-/* Compact source marker (🐧 WSL / 🔗 SSH) before the session title */
-.hud-source {
-  font-size: 11px;
-  line-height: 1;
-  flex: 0 0 auto;
-}
-
-.dot-running { background: var(--running); animation: dot-pulse 1.6s ease-in-out infinite; }
-.dot-done { background: var(--done); }
-.dot-interrupted { background: var(--interrupted); }
-.dot-idle { background: var(--idle); }
-
-@keyframes dot-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.55; transform: scale(0.8); }
-}
-
-.agent-icon {
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  object-fit: contain;
-}
-
-.title {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 600;
-  line-height: 1;
-  color: var(--text);
-}
-
-.session-inline-feedback {
-  color: var(--text-muted);
-  font-size: 10px;
-  font-weight: 500;
-}
-
-.chip-recovered {
-  border: 1px dashed currentColor;
-}
-
-.row-folded .title {
-  font-weight: 500;
-  color: var(--text-muted);
-}
-
-.right {
-  flex: 0 1 auto;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-weight: 400;
-  line-height: 1;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-  max-width: 58%;
-  /* Flexbox quirk: overflow:hidden makes a flex item's AUTOMATIC minimum
-     size 0, so under squeeze .right shrinks below its chips and its own
-     overflow clipping cuts them mid-glyph. min-content restores a real
-     floor: it equals bell+chips+gaps exactly, because the elapsed span
-     carries its own zero floor and contributes nothing. Squeeze order:
-     title first, then elapsed, chips never clip. */
-  min-width: min-content;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.elapsed {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.state-chip {
-  flex: 0 0 auto;
-  font-size: 10px;
-  font-weight: 500;
-  line-height: 1;
-  padding: 2px 5px;
-  border-radius: 3px;
-  white-space: nowrap;
-}
-.chip-thinking { background: rgba(99, 102, 241, 0.13); color: #6366f1; }
-.chip-working { background: rgba(22, 163, 74, 0.13); color: #16a34a; }
-.chip-juggling { background: rgba(245, 158, 11, 0.15); color: #b45309; }
-.chip-sweeping { background: rgba(107, 114, 128, 0.13); color: #52525b; }
-.chip-notification { background: rgba(245, 158, 11, 0.15); color: #b45309; }
-.chip-worktree { background: rgba(59, 130, 246, 0.13); color: #2563eb; }
-.chip-interrupted { background: rgba(239, 68, 68, 0.10); color: #dc2626; }
-
-.usage-chip {
-  flex: 0 0 auto;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1;
-  padding: 2px 5px;
-  border-radius: 3px;
-  white-space: nowrap;
-}
-.usage-neutral { background: rgba(107, 114, 128, 0.13); color: #52525b; }
-.usage-warm { background: rgba(245, 158, 11, 0.15); color: #b45309; }
-.usage-hot { background: rgba(239, 68, 68, 0.10); color: #dc2626; }
-
-@media (prefers-color-scheme: dark) {
-  .chip-thinking { background: rgba(99, 102, 241, 0.20); color: #818cf8; }
-  .chip-working { background: rgba(22, 163, 74, 0.20); color: #4ade80; }
-  .chip-juggling { background: rgba(245, 158, 11, 0.20); color: #fbbf24; }
-  .chip-sweeping { background: rgba(107, 114, 128, 0.20); color: #a1a1aa; }
-  .chip-notification { background: rgba(245, 158, 11, 0.20); color: #fbbf24; }
-  .chip-worktree { background: rgba(59, 130, 246, 0.20); color: #60a5fa; }
-  .chip-interrupted { background: rgba(239, 68, 68, 0.15); color: #f87171; }
-  .usage-neutral { background: rgba(107, 114, 128, 0.20); color: #a1a1aa; }
-  .usage-warm { background: rgba(245, 158, 11, 0.20); color: #fbbf24; }
-  .usage-hot { background: rgba(239, 68, 68, 0.15); color: #f87171; }
-}
-
-.completion-bell {
-  flex: 0 0 auto;
-  color: #f59e0b;
-  display: flex;
-  align-items: center;
-}
-
-.focus-unavailable {
-  width: 13px;
-  height: 13px;
-  flex: 0 0 13px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-muted);
-  opacity: 0.72;
-}
-
-.focus-unavailable svg {
-  width: 11px;
-  height: 11px;
-}
-
-.open-folder-button {
-  flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  border: 0;
-  border-radius: 4px;
-  padding: 0;
-  background: rgba(59, 130, 246, 0.14);
-  color: var(--text);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.open-folder-button:disabled { opacity: 0.55; }
-
-@keyframes bell-ring {
-  0%   { transform: rotate(0deg); }
-  10%  { transform: rotate(12deg); }
-  20%  { transform: rotate(-10deg); }
-  30%  { transform: rotate(8deg); }
-  40%  { transform: rotate(-6deg); }
-  50%  { transform: rotate(0deg); }
-  100% { transform: rotate(0deg); }
-}
-
-.unread-bell svg {
-  animation: bell-ring 1.8s ease-in-out infinite;
-  transform-origin: 50% 2px;
+  /* 展开/收起二级菜单时高度平滑过渡，配合 overflow:hidden 像拉开抽屉 */
+  transition: height 0.18s ease;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dot-running {
-    animation: none;
-  }
+  .quick-card,
+  .quick-menu { transition: none; }
+}
 
-  .unread-bell svg {
-    animation: none;
+/* 卡片总高 = 6 + 16 + 4 + 28 + 4 + 菜单(收起 0，仍占一个 4px 行距)
+   + 4 + 28 + 4 + 32 + 6 + 2 = 134px */
+.quick-card { height: 134px; }
+
+/* 展开二级设置菜单：菜单区 182px（模式列表 142 + 间距 4 + 滑块区 36）
+   → 134 + 182 = 316px。主进程按同一组数字算窗口高度。 */
+body.menu-open .quick-card { height: 316px; }
+
+/* ===== 状态行（第 1 行，16px 单行省略） ===== */
+.quick-status-row {
+  height: 16px;
+  flex: 0 0 16px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.quick-status-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-muted);
+}
+
+.quick-status-text.is-error {
+  color: var(--interrupted);
+}
+
+/* ===== 设置行（第 2 行，28px：「权限模式 · effort」按钮） ===== */
+.quick-level-btn {
+  width: 100%;
+  height: 28px;
+  flex: 0 0 28px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--hud-border);
+  border-radius: 6px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.quick-level-btn:hover {
+  background: rgba(127, 127, 127, 0.14);
+}
+
+.quick-level-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  line-height: 1;
+}
+
+/* 右侧小箭头，展开时翻转朝上 */
+.quick-level-caret {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  opacity: 0.6;
+  transition: transform 0.12s ease;
+}
+
+body.menu-open .quick-level-caret { transform: rotate(180deg); }
+
+/* ===== 二级设置菜单（展开时 182px：模式列表 142 + 间距 4 + 滑块区 36） =====
+   收起不是 display:none（那样菜单内容会瞬间消失、看着"闪"），而是高度 0 过渡：
+   内容由 overflow:hidden 裁切，和卡片高度同步伸缩。 */
+.quick-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: 0;
+  overflow: hidden;
+  min-width: 0;
+  transition: height 0.18s ease;
+}
+
+body.menu-open .quick-menu { height: 182px; }
+
+.quick-menu-modes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 每个模式两行：名称 + 一行解释 */
+.quick-mode-option {
+  height: 34px;
+  flex: 0 0 34px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.quick-mode-option:hover { background: rgba(127, 127, 127, 0.14); }
+
+.quick-mode-option.is-active {
+  border-color: rgba(59, 130, 246, 0.55);
+  background: rgba(59, 130, 246, 0.14);
+}
+
+.quick-mode-name {
+  font-size: 12px;
+  line-height: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quick-mode-desc {
+  font-size: 10px;
+  line-height: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* effort 滑块区：标签行 12 + 间距 4 + 滑轨 20 = 36 */
+.quick-menu-effort {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.quick-effort-head {
+  height: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-muted);
+}
+
+.quick-effort-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-effort-value {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.quick-effort-range {
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  accent-color: rgba(59, 130, 246, 0.9);
+  cursor: pointer;
+}
+
+.quick-effort-range:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 鼠标点击不显示系统默认的焦点环（macOS 上是那圈黄边）；键盘 Tab 导航时
+   用我们自己的蓝圈代替（:focus-visible 只在键盘交互时命中）。 */
+.quick-level-btn:focus,
+.quick-mode-option:focus,
+.quick-folder-btn:focus,
+.quick-stop-btn:focus,
+.quick-effort-range:focus {
+  outline: none;
+}
+
+.quick-level-btn:focus-visible,
+.quick-mode-option:focus-visible,
+.quick-folder-btn:focus-visible,
+.quick-stop-btn:focus-visible,
+.quick-effort-range:focus-visible {
+  outline: 2px solid rgba(59, 130, 246, 0.6);
+  outline-offset: 1px;
+}
+
+/* ===== 工作文件夹行（第 3 行，28px） ===== */
+.quick-folder-btn {
+  width: 100%;
+  height: 28px;
+  flex: 0 0 28px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--hud-border);
+  border-radius: 6px;
+  padding: 0 8px;
+  background: rgba(59, 130, 246, 0.14);
+  color: var(--text);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.quick-folder-btn:hover {
+  background: rgba(59, 130, 246, 0.22);
+}
+
+.quick-folder-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  line-height: 1;
+}
+
+/* ===== 输入行（第 4 行，32px：输入框 + 28×28 停止按钮） ===== */
+.quick-input-row {
+  height: 32px;
+  flex: 0 0 32px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.quick-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  border: 1px solid var(--hud-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 0 8px;
+  outline: none;
+  user-select: text;
+}
+
+.quick-input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.85;
+}
+
+.quick-input:focus {
+  border-color: rgba(59, 130, 246, 0.55);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.quick-stop-btn {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  padding: 0;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.12);
+  color: #dc2626;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.quick-stop-btn:hover {
+  background: rgba(239, 68, 68, 0.20);
+}
+
+@media (prefers-color-scheme: dark) {
+  .quick-stop-btn {
+    color: #f87171;
   }
 }
 </style>
 </head>
 <body>
-  <div id="hud" class="hud"></div>
-  <script src="./session-focus-unavailable.js"></script>
+  <div id="hud"></div>
   <script src="./session-hud-renderer.js"></script>
 </body>
 </html>

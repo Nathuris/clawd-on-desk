@@ -7,6 +7,10 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const { i18n, SUPPORTED_LANGS } = require("../src/i18n");
+// 悬停面板 HUD 的运行时字典是「i18n.js + chat-i18n.js」合并体（main.js 的
+// getHudI18nPayload）：effort/权限模式等键住在 chat 字典里，键检查要认它。
+require("../src/chat-i18n");
+const chatStrings = (globalThis.ClawdChatI18n && globalThis.ClawdChatI18n.STRINGS) || {};
 
 const ROOT = path.join(__dirname, "..");
 
@@ -372,7 +376,11 @@ describe("i18n locales", () => {
       }
       assert.ok(keys.size, `${file} should call t() with literal keys`);
       for (const key of keys) {
-        assert.ok(key in i18n.en, `${file}: i18n key "${key}" is missing from src/i18n.js`);
+        // 合并字典的两半都算数（见文件头 chatStrings 注释）。
+        assert.ok(
+          key in i18n.en || key in (chatStrings.en || {}),
+          `${file}: i18n key "${key}" is missing from src/i18n.js (and chat-i18n.js)`
+        );
       }
     }
   });
