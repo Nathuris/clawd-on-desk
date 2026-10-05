@@ -89,6 +89,11 @@ const {
   createSettingsSizePreviewSession,
 } = require("./settings-size-preview-session");
 const { registerSettingsIpc } = require("./settings-ipc");
+// 内置 Claude 对话（阶段一）。chat-window 默认导出工厂（同 settings-window）；
+// chat-ipc / chat-session-runtime 用具名导出。
+const createChatWindowRuntime = require("./chat-window");
+const { registerChatIpc } = require("./chat-ipc");
+const { createChatSessionRuntime } = require("./chat-session-runtime");
 const createSettingsEffectRouter = require("./settings-effect-router");
 const { createRecapRuntime } = require("./recap-runtime");
 const { createKimiQuotaClient } = require("./kimi-quota-client");
@@ -120,7 +125,7 @@ const { createSessionFolderOpener } = require("./session-open-folder");
 const { isTrustedMainFrameEvent, registerPetInteractionIpc } = require("./pet-interaction-ipc");
 const { createSystemWakeRecovery } = require("./system-wake-recovery");
 const { formatLocalTimestamp } = require("./log-timestamp");
-const { launchClaudeSession, openTerminalAt } = require("./launch-claude");
+const { launchClaudeSession, openTerminalAt, findClaudeCmd } = require("./launch-claude");
 const { dialog: electronDialog } = require("electron");
 const initPermission = require("./permission");
 const { isPassiveNotifyEntry } = require("./passive-notify-entry");
@@ -903,6 +908,84 @@ const settingsWindowRuntime = createSettingsWindowRuntime({
   },
 });
 
+// ── 内置 Claude 对话（阶段一）──
+let chatWindowRuntime = null;
+// registerChatIpc 的返回值（含 pushUpdate / dispose）。runtime 先创建、IPC 后
+// 注册，推送出口用这个可空的前向引用；注册前的状态变化由加载首推 + get-state 兜底。
+let chatIpcRuntime = null;
+
+function getChatWindow() {
+  return chatWindowRuntime ? chatWindowRuntime.getWindow() : null;
+}
+
+// 首开引导：还没有工作目录时弹一次目录选择（取消则维持空目录，渲染端会
+// 禁用输入并显示「请先选择工作目录」）。选择结果与点目录按钮走同一份
+// prefs（chatLastWorkingDir）和 runtime.setWorkingDir。
+async function promptChatWorkingDirIfMissing() {
+  let cwd = null;
+  try { cwd = chatRuntime.getState().cwd; } catch {}
+  if (cwd) return;
+  const parent = getChatWindow();
+  const dialogOptions = { properties: ["openDirectory", "createDirectory"] };
+  let result;
+  try {
+    result = parent && !parent.isDestroyed()
+      ? await dialog.showOpenDialog(parent, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
+  } catch (err) {
+    console.warn("Clawd: chat working dir dialog failed:", err && err.message);
+    return;
+  }
+  const picked = result && !result.canceled && Array.isArray(result.filePaths)
+    ? result.filePaths[0]
+    : null;
+  if (!picked) return;
+  // prefs 校验失败只告警，不挡住本次会话使用该目录（与 chat-ipc 的选择流程一致）。
+  try {
+    const applyResult = _settingsController.applyUpdate("chatLastWorkingDir", picked);
+    if (applyResult && applyResult.status === "error") {
+      console.warn("Clawd: failed to persist chatLastWorkingDir:", applyResult.message);
+    }
+  } catch (err) {
+    console.warn("Clawd: failed to persist chatLastWorkingDir:", err && err.message);
+  }
+  try { await chatRuntime.setWorkingDir(picked); } catch (err) {
+    console.warn("Clawd: chat setWorkingDir failed:", err && err.message);
+  }
+}
+
+chatWindowRuntime = createChatWindowRuntime({
+  app,
+  BrowserWindow,
+  nativeTheme,
+  path,
+  getNearestWorkArea: (cx, cy) => getNearestWorkArea(cx, cy),
+  getTextScale: (bounds) => effectiveTextScaleForKey(
+    getDisplayKeyForBounds(bounds) || getSettingsDisplayKey()
+  ),
+  getSavedBounds: () => _settingsController.get("chatWindowBounds"),
+  onSaveBounds: (bounds) => _settingsController.applyUpdate("chatWindowBounds", bounds),
+  getTitle: () => translate("chatWindowTitle"),
+  // 首开且没有工作目录：页面加载完成后弹目录选择（见上面的引导函数）。
+  onDidFinishLoad: () => { void promptChatWorkingDirIfMissing(); },
+  // 关窗即停掉当前会话（interrupt 当前回合并释放 driver）；SDK 子进程留到
+  // 应用退出时由 chatRuntime.dispose() 统一清掉（见 before-quit）。
+  // 退出流程里 dispose 先于关窗发生，这里的 stop 兜底吞异常（幂等）。
+  onAfterClosed: () => { try { chatRuntime.stop(); } catch {} },
+});
+
+const chatRuntime = createChatSessionRuntime({
+  settingsController: _settingsController,
+  findClaudeCmd,
+  // 权限确认走桌宠气泡：不注入 canUseTool，Claude Code 的 PermissionRequest
+  // hook 会打到应用自己的 /permission 路由（见 server-route-permission.js），
+  // 用户点气泡即完成决策。
+  // 经 chat-ipc 的 pushUpdate 推送（它会附带 lang 供渲染端 i18n 使用）。
+  onUpdate: (state) => {
+    if (chatIpcRuntime) chatIpcRuntime.pushUpdate(state);
+  },
+});
+
 const permissionAutomationConfirmationRuntime = createPermissionAutomationConfirmationRuntime({
   BrowserWindow,
   ipcMain,
@@ -1439,6 +1522,13 @@ function applyTextScaleNow() {
     }
   } catch (err) {
     console.warn("Clawd: dashboard text scale failed:", err && err.message);
+  }
+  try {
+    if (chatWindowRuntime && typeof chatWindowRuntime.applyTextScale === "function") {
+      chatWindowRuntime.applyTextScale();
+    }
+  } catch (err) {
+    console.warn("Clawd: chat window text scale failed:", err && err.message);
   }
   repositionAnchoredFloatingSurfaces();
 }
@@ -2986,6 +3076,10 @@ const _serverCtx = {
   isAgentSubagentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentSubagentPermissionsEnabled(agentId),
   // 名单内编辑器窗口可见时不弹权限气泡：实时读设置，任何异常都 fail-open（不压制）。
   shouldSuppressPermissionForVisibleEditor: () => _editorVisibleGate.shouldSuppress(),
+  // 判断某个 session_id 是否属于应用内置的聊天会话：聊天会话由应用自己发起，
+  // 没有原生的确认界面，权限请求不能被「编辑器可见」压制闸门丢弃（见
+  // server-route-permission.js）。惰性取值，chatRuntime 已在文件上方定义。
+  isClawdChatSession: (id) => chatRuntime.isOwnedSession(id),
   isCodexNativeNotificationSoundEnabled: () => _runtimeAgentGate.isCodexNativeNotificationSoundEnabled(),
   isCodexPermissionInterceptEnabled: () => _runtimeAgentGate.isCodexPermissionInterceptEnabled(),
   codexSubagentClassifier: agentRuntime.getCodexSubagentClassifier(),
@@ -3536,6 +3630,17 @@ function drainRemoteSshAndFeishuBeforeQuit() {
     settingsIpcRuntime.dispose();
   } catch (err) {
     console.error("settings IPC shutdown failed:", err && err.message);
+  }
+  // 内置对话：先解绑 IPC，再等会话子进程收尾（5s 超时兜底，不卡退出）。
+  try {
+    if (chatIpcRuntime) chatIpcRuntime.dispose();
+  } catch (err) {
+    console.error("chat IPC shutdown failed:", err && err.message);
+  }
+  try {
+    drains.push(settleDrainWithin(chatRuntime.dispose(), 5000));
+  } catch (err) {
+    console.error("chat runtime shutdown failed:", err && err.message);
   }
   if (_remoteSshRuntime && typeof _remoteSshRuntime.shutdown === "function") {
     drains.push(
@@ -4600,6 +4705,7 @@ const _menuCtx = {
   getActiveThemeCapabilities: () => themeRuntime.getActiveThemeCapabilities(),
   ensureUserThemesDir: () => themeLoader.ensureUserThemesDir(),
   openSettingsWindow: (options) => settingsWindowRuntime.open(options),
+  openChatWindow: (options) => chatWindowRuntime.open(options),
   showTutorial: () => _tutorial.open(),
 };
 const _menu = require("./menu")(_menuCtx);
@@ -4682,6 +4788,14 @@ const settingsEffectRouter = createSettingsEffectRouter({
   sendSessionHudI18n: () => sendSessionHudI18n(),
   syncWindowTitles: () => {
     settingsWindowRuntime.applyTitleToWindow();
+    // 聊天窗口的页面标题固定为英文（chat.html），原生标题只有在这里重设；
+    // 再推一帧带新 lang 的状态，渲染端界面文案随语言切换即时刷新。
+    if (chatWindowRuntime && typeof chatWindowRuntime.applyTitleToWindow === "function") {
+      chatWindowRuntime.applyTitleToWindow();
+    }
+    if (chatIpcRuntime && typeof chatIpcRuntime.broadcastState === "function") {
+      chatIpcRuntime.broadcastState();
+    }
     // syncLocalization pushes BOTH the native title AND fresh renderer state
     // (dictionary/lang), so an external language change from Settings keeps
     // the tutorial body, buttons, and document.title in sync with the new
@@ -5060,6 +5174,18 @@ const settingsIpcRuntime = registerSettingsIpc({
   },
   aboutHeroSvgPath: path.join(__dirname, "..", "assets", "svg", "clawd-about-hero.svg"),
   getLanWsServer: () => _lanWss,
+});
+
+// 内置对话的 IPC 通道（invoke + 状态推送）。app 用于监听窗口创建并在
+// did-finish-load 后首推状态；getLang 决定弹窗与推送载荷的语言。
+chatIpcRuntime = registerChatIpc({
+  ipcMain,
+  app,
+  getChatWindow,
+  chatRuntime,
+  settingsController: _settingsController,
+  dialog,
+  getLang: () => lang,
 });
 
 const sessionHistoryRuntime = createSessionHistoryRuntime({

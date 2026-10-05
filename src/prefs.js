@@ -127,6 +127,26 @@ const SCHEMA = {
     defaultFactory: () => null,
     normalize: normalizeSettingsWindowBounds,
   },
+  // 内置 Claude 对话窗口（阶段一）。几何契约与 settingsWindowBounds 相同：
+  // null 表示用户还没放过窗口，运行时用默认位置。
+  chatWindowBounds: {
+    type: "object",
+    defaultFactory: () => null,
+    normalize: normalizeSettingsWindowBounds,
+  },
+  // 对话窗口的默认推理强度（effort）与权限模式；切换工作目录 = 开新会话。
+  chatDefaultEffort: {
+    type: "string",
+    default: "medium",
+    enum: ["low", "medium", "high", "xhigh", "max"],
+  },
+  chatDefaultPermissionMode: {
+    type: "string",
+    default: "acceptEdits",
+    enum: ["default", "acceptEdits", "plan", "auto"],
+  },
+  // 记住上次选择的工作目录，空串表示还没选过（首次打开时引导选择）。
+  chatLastWorkingDir: { type: "string", default: "" },
   size: {
     type: "string",
     default: "P:9",

@@ -289,6 +289,19 @@ const updateRegistry = {
       message: "dashboardWindowBounds must be null or integer { x, y, width, height } with positive dimensions",
     };
   },
+  // ── Chat window (built-in Claude chat, phase 1) ──
+  // 几何校验照 settingsWindowBounds：null 或正整数 { x, y, width, height }。
+  chatWindowBounds: (value) => {
+    if (value === null || isValidSettingsWindowBounds(value)) return { status: "ok" };
+    return {
+      status: "error",
+      message: "chatWindowBounds must be null or integer { x, y, width, height } with positive dimensions",
+    };
+  },
+  chatDefaultEffort: requireEnum("chatDefaultEffort", ["low", "medium", "high", "xhigh", "max"]),
+  chatDefaultPermissionMode: requireEnum("chatDefaultPermissionMode", ["default", "acceptEdits", "plan", "auto"]),
+  // 空串 = 还没选过工作目录；只允许字符串，清洗交给 prefs 侧的默认值。
+  chatLastWorkingDir: requireString("chatLastWorkingDir", { allowEmpty: true }),
   // #408: frozen-origin work area for keepSizeAcrossDisplays. null = unknown
   // (legacy prefs / never seeded); otherwise positive width+height.
   savedPixelWorkArea: (value) => {

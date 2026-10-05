@@ -206,6 +206,17 @@ function shouldSuppressForVisibleEditor(ctx) {
     && ctx.shouldSuppressPermissionForVisibleEditor() === true;
 }
 
+// 内置对话（Clawd 自带聊天窗口的 SDK 会话）的权限请求不能走「编辑器可见压制」：
+// 这些会话由应用自己发起，窗口和编辑器里都没有原生的确认界面可回退，压制断连
+// 只会把请求静默丢弃。仅当 ctx 提供了聊天会话登记接口、且 sessionId 是非空
+// 字符串并确实登记为聊天会话时才豁免。
+function isClawdChatSessionRequest(ctx, sessionId) {
+  return typeof ctx.isClawdChatSession === "function"
+    && typeof sessionId === "string"
+    && sessionId.trim() !== ""
+    && ctx.isClawdChatSession(sessionId) === true;
+}
+
 function normalizeString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
@@ -2267,7 +2278,10 @@ function handlePermissionPost(req, res, options) {
       // ② 不同于 permissionBubblesEnabled=false：这里也不启动 Telegram / 飞书远程确认，
       //    用户拍板「直接不显示」。
       // ③ 绝不 allow / deny：res.destroy() 断连后 Claude Code 回落到原生确认界面，由用户自己拍板。
-      if (shouldSuppressForVisibleEditor(ctx)) {
+      // ④ 例外：内置对话的会话由应用自己发起，窗口（或编辑器）里没有原生的确认界面可看，
+      //    不能被该压制拦掉，否则请求会被静默丢弃；这些会话照常弹桌宠气泡，由用户点气泡决定。
+      if (shouldSuppressForVisibleEditor(ctx)
+        && !isClawdChatSessionRequest(ctx, data.session_id)) {
         recordRequestHookEvent.accepted();
         ctx.permLog(`editor window visible → destroy connection, native prompt fallback (tool=${toolName})`);
         res.destroy();

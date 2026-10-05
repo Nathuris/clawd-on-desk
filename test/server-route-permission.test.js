@@ -3390,4 +3390,71 @@ describe("编辑器可见压制", () => {
     }]);
     assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
   });
+
+  // 内置对话（Clawd 聊天窗口的 SDK 会话）由应用自己发起，窗口和编辑器里都没有
+  // 原生确认界面可回退；压制断连只会把请求静默丢弃，所以聊天会话必须豁免、照常弹气泡。
+  it("内置对话会话豁免压制：照常创建气泡", async () => {
+    const chatSessionId = "claude-chat:session-exempt";
+    const res = await callPermissionPost(JSON.stringify({
+      session_id: chatSessionId,
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    }), {
+      ctx: {
+        shouldSuppressPermissionForVisibleEditor: () => true,
+        isClawdChatSession: (id) => id === chatSessionId,
+      },
+    });
+
+    assert.strictEqual(res.destroyed, false, "chat session must not be dropped");
+    assert.strictEqual(res.ctx.pendingPermissions.length, 1);
+    assert.strictEqual(res.ctx.calls.showPermissionBubble.length, 1);
+    assert.strictEqual(res.ctx.calls.addPendingPermission.length, 1);
+  });
+
+  it("非聊天会话仍然压制：豁免不能扩大范围", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      session_id: "claude:editor-visible",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    }), {
+      ctx: {
+        shouldSuppressPermissionForVisibleEditor: () => true,
+        isClawdChatSession: () => false,
+      },
+    });
+
+    assert.strictEqual(res.destroyed, true, "non-chat sessions keep the original drop");
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+  });
+
+  it("ctx 未提供 isClawdChatSession 时原行为不变", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      session_id: "claude:no-chat-registry",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    }), {
+      ctx: { shouldSuppressPermissionForVisibleEditor: () => true },
+    });
+
+    assert.strictEqual(res.destroyed, true);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+  });
+
+  it("session_id 缺失时即便登记函数返回 true 也仍压制", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    }), {
+      ctx: {
+        shouldSuppressPermissionForVisibleEditor: () => true,
+        isClawdChatSession: () => true,
+      },
+    });
+
+    assert.strictEqual(res.destroyed, true, "an empty session id is not a registered chat session");
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+  });
 });
