@@ -17,7 +17,7 @@
 //
 // 卡片尺寸/窗口壳常量必须与 session-hud.html 的 CSS 严格一致：
 //   收起 300×134 / 展开 300×316（二级菜单 182px）
-//   + 壳 top2/right3/bottom30(输入法候选窗净空)/left3 → 窗口 306×166 / 306×348
+//   + 壳 top2/right3/bottom60(输入法候选窗净空)/left3 → 窗口 306×196 / 306×378
 
 const { BrowserWindow, screen } = require("electron");
 const path = require("path");
@@ -33,7 +33,9 @@ const isWin = process.platform === "win32";
 const QUICK_CARD = Object.freeze({ width: 300, height: 134 });
 // 展开二级设置菜单后：菜单 0 → 182，即 134 + 182 = 316。
 const QUICK_CARD_EXPANDED = Object.freeze({ width: 300, height: 316 });
-const QUICK_SHELL = Object.freeze({ top: 2, right: 3, bottom: 30, left: 3 });
+// 底部 60px 是输入法候选窗的净空：太小的话 macOS 会认为「光标下面放不下」，
+// 把候选窗翻到输入框上方，结果被卡片盖住。
+const QUICK_SHELL = Object.freeze({ top: 2, right: 3, bottom: 60, left: 3 });
 const BLOCK_PET_GAP = 6;
 const BLOCK_WIDTH_GROWTH_RATIO = 0.4;
 const EDGE_MARGIN = 8;
@@ -269,6 +271,9 @@ module.exports = function initSessionHud(ctx) {
   let panelOpacityTimer = null;
   // 收起菜单后待应用的「隐藏时缩窗」目标（可见期间只记不缩）
   let pendingHiddenBounds = null;
+  // 透明区点击穿透：卡片外的区域（收起菜单后窗口比卡片高的那截）不该挡住
+  // 底下应用的点击。null = 尚未设置过（新建窗口后要重新应用一次）。
+  let clickThrough = null;
   let latestSnapshot = null;
   let ringWindow = null;
   let ringDidFinishLoad = false;
@@ -530,6 +535,16 @@ module.exports = function initSessionHud(ctx) {
         pad: Math.round(HOT_ZONE_PAD * scale),
       });
       inHotZone = inHotZone || pointInHotZone(cursor, hotZone);
+      // 透明区穿透兜底：指针在卡片内 → 正常接收点击；在卡片外的透明区
+      // → 放行给下面的应用。渲染端的 mousemove 是快路径，这里防漏。
+      const cardBounds = expected && expected.panel && expected.panel.contentBounds;
+      if (cardBounds) {
+        const insideCard = cursor.x >= cardBounds.x
+          && cursor.x <= cardBounds.x + cardBounds.width
+          && cursor.y >= cardBounds.y
+          && cursor.y <= cardBounds.y + cardBounds.height;
+        setClickThrough(!insideCard);
+      }
     }
     const now = Date.now();
 
@@ -833,8 +848,10 @@ module.exports = function initSessionHud(ctx) {
     const scale = getTextScale();
     const widthScale = getBlockWidthScale(scale);
     const sh = shellScaled(QUICK_SHELL, scale);
+    // 刻意不设 parent：子窗口会继承宠物窗口的层级，输入框聚焦时「让出置顶」
+    // 对它无效，中文输入法候选窗会被面板压住。权限气泡（输入法正常）也是
+    // 独立窗口；面板靠 reapplyMacVisibility 自己维持层级与跨 Space。
     const win = new BrowserWindow({
-      parent: ctx.win,
       width: Math.round(QUICK_CARD.width * widthScale) + sh.left + sh.right,
       height: scaleHeight(QUICK_CARD.height, scale) + sh.top + sh.bottom,
       show: false,
@@ -862,6 +879,8 @@ module.exports = function initSessionHud(ctx) {
       },
     });
     panel.win = win;
+    // 新窗口：穿透状态要重新应用一次（显示时默认穿透）。
+    clickThrough = null;
     // 首次显示也要淡入：窗口从全透明开始（setOpacity 不可用的平台上是空操作）。
     try { win.setOpacity(0); } catch {}
 
@@ -888,6 +907,7 @@ module.exports = function initSessionHud(ctx) {
       cancelHiddenDestroy("panel");
       cancelPanelFade();
       pendingHiddenBounds = null;
+      clickThrough = null;
       panel.win = null;
       panel.loaded = false;
       // 渲染端随窗口一起没了，再也发不出 setHold(..., false)——残留的 hold
@@ -1006,11 +1026,28 @@ module.exports = function initSessionHud(ctx) {
   }
 
 
+  // 透明区穿透开关。渲染端在指针进出卡片时用 mousemove 快速上报，主进程
+  // 的自动收起轮询也会同步一次兜底（避免漏掉一次移动导致点击被吃掉）。
+  function setClickThrough(through) {
+    const next = through === true;
+    if (next === clickThrough) return;
+    const win = panel.win;
+    if (!win || win.isDestroyed()) return;
+    clickThrough = next;
+    try {
+      if (next) win.setIgnoreMouseEvents(true, { forward: true });
+      else win.setIgnoreMouseEvents(false);
+    } catch {}
+  }
+
   function showPanel() {
     const win = panel.win;
     if (!win || win.isDestroyed() || !panel.loaded) return;
     cancelHiddenDestroy("panel");
     if (!win.isVisible()) {
+      // 只在状态未知时默认穿透（新窗口 / 首次显示）。已知值不覆盖：
+      // 同一轮 sync 里轮询已经按真实光标位置算过一次了。
+      if (clickThrough === null) setClickThrough(true);
       win.showInactive();
       keepOutOfTaskbar(win);
       if (isMac) deferMacFloatingVisibility(ctx, win);
@@ -1153,6 +1190,7 @@ module.exports = function initSessionHud(ctx) {
     cancelHiddenDestroy();
     cancelPanelFade();
     pendingHiddenBounds = null;
+    clickThrough = null;
     expanded = false;
     holdReasons.delete("menu");
     const win = panel.win;
@@ -1189,6 +1227,7 @@ module.exports = function initSessionHud(ctx) {
     setHold,
     setMenuOpen,
     isMenuOpen,
+    setClickThrough,
     pushQuickState,
     isPanelOpen,
   };

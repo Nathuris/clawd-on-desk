@@ -55,6 +55,9 @@ let folderBtnEl = null;
 let folderLabelEl = null;
 // 正在拖 effort 滑块：拖动期间不被 quick-state 推来的旧值抢回去。
 let effortDragging = false;
+// 卡片节点 + 上一次上报的穿透状态：指针进出卡片时通知主进程切换
+let cardEl = null;
+let lastClickThrough = null;
 
 function t(key) {
   const dict = i18nPayload && i18nPayload.translations ? i18nPayload.translations : {};
@@ -426,6 +429,7 @@ function buildPanel() {
   if (!hudEl) return;
   const card = document.createElement("div");
   card.className = "quick-card";
+  cardEl = card;
   card.appendChild(createStatusRow());
   card.appendChild(createLevelRow());
   card.appendChild(createMenu());
@@ -450,6 +454,21 @@ async function init() {
     updateStopButton();
     updateMenu();
     updateSettingsBlock();
+  });
+  // 指针进出卡片：卡片外的透明区（收起菜单后窗口比卡片高的那截）放行点击，
+  // 别挡住底下应用的点击。主进程的轮询另有兜底。
+  document.addEventListener("mousemove", (event) => {
+    if (!cardEl) return;
+    const rect = cardEl.getBoundingClientRect();
+    const inside = event.clientX >= rect.left && event.clientX <= rect.right
+      && event.clientY >= rect.top && event.clientY <= rect.bottom;
+    if (!inside === lastClickThrough) return;
+    lastClickThrough = !inside;
+    try {
+      window.sessionHudAPI.setClickThrough(!inside);
+    } catch (err) {
+      console.warn("set click through threw:", err);
+    }
   });
   // Esc 收起二级菜单（面板整体的收起仍走鼠标离开）
   document.addEventListener("keydown", (event) => {

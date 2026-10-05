@@ -105,6 +105,10 @@ class FakeElement {
   replaceWith() {}
   focus() { if (this.ownerDocument) this.ownerDocument.activeElement = this; }
   select() {}
+  // 假布局：默认零矩形，用例通过 setCardRect 覆盖（卡片高度随菜单展开变化由用例模拟）。
+  getBoundingClientRect() {
+    return this.rect || { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+  }
   // 真 DOM 的 <select> 一定有 options 集合（保留给可能带下拉的渲染端）。
   get options() {
     return this.children.filter((child) => child && child.tagName === "OPTION");
@@ -382,6 +386,7 @@ async function loadHud(options = {}) {
     setEffort: [],
     setPermissionMode: [],
     setMenuOpen: [],
+    setClickThrough: [],
     pickWorkingDir: 0,
     stopChat: 0,
     setHold: [],
@@ -422,6 +427,11 @@ async function loadHud(options = {}) {
       calls.setMenuOpen.push(open);
       if (options.setMenuOpenThrows) throw new Error("set menu open failed");
       return options.setMenuOpenResult || { status: "ok" };
+    },
+    // 与 preload 一致：同步 send，不返回 Promise。
+    setClickThrough: (through) => {
+      calls.setClickThrough.push(through);
+      if (options.setClickThroughThrows) throw new Error("set click through failed");
     },
     pickWorkingDir: async () => {
       calls.pickWorkingDir += 1;
@@ -466,6 +476,11 @@ async function loadHud(options = {}) {
     find,
     one: (className) => find(className)[0] || null,
     byTag: (tagName) => descendants(root).filter((el) => el.tagName === String(tagName).toUpperCase()),
+    // 假布局：给卡片设定 getBoundingClientRect 的返回值（菜单展开引起的高度变化由用例模拟）。
+    setCardRect: (rect) => {
+      const card = find("quick-card")[0];
+      if (card) card.rect = rect;
+    },
     pushQuickState: (state) => {
       assert.strictEqual(typeof quickListener, "function", "renderer must register onQuickState");
       quickListener(state);
@@ -1031,7 +1046,28 @@ test("quick panel: Escape closes an open menu only", async () => {
   assert.strictEqual(event.defaultPrevented, true);
 });
 
-/* ===== 快捷面板：菜单开合过渡跑完的回报 ===== */
+/* ===== 快捷面板：指针进出卡片的点击穿透 ===== */
+
+test("click through: pointer moves report only when the inside/outside side changes", async () => {
+  const hud = await loadHud();
+  hud.setCardRect({ left: 0, top: 0, right: 300, bottom: 130 });
+  await hud.document.dispatch("mousemove", { clientX: 500, clientY: 500 }); // 卡片外
+  await hud.document.dispatch("mousemove", { clientX: 10, clientY: 10 });   // 卡片内
+  await hud.document.dispatch("mousemove", { clientX: 20, clientY: 20 });   // 仍在卡片内
+  assert.deepStrictEqual(hud.calls.setClickThrough, [true, false]);
+});
+
+test("click through: the card rect follows the menu height so the same point flips inside", async () => {
+  const hud = await loadHud();
+  hud.setCardRect({ left: 0, top: 0, right: 300, bottom: 130 }); // 收起态
+  await hud.document.dispatch("mousemove", { clientX: 150, clientY: 200 }); // 在收起卡片下方
+  assert.deepStrictEqual(hud.calls.setClickThrough, [true]);
+
+  hud.pushQuickState({ menuOpen: true });
+  hud.setCardRect({ left: 0, top: 0, right: 300, bottom: 316 }); // 展开态
+  await hud.document.dispatch("mousemove", { clientX: 150, clientY: 200 }); // 同一点落进卡片内
+  assert.deepStrictEqual(hud.calls.setClickThrough, [true, false]);
+});
 
 /* ===== 快捷面板：状态行与输入行 ===== */
 

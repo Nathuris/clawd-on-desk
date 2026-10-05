@@ -11015,8 +11015,11 @@ describe("settings renderer browser environment", () => {
     assert.ok(!/key:\s*"soundMuted",[\s\S]{0,120}descKey:\s*"rowSoundDesc"/.test(generalSource));
     assert.ok(generalSource.includes('state.transientUiState.generalSwitches.set("soundMuted"'));
     assert.ok(generalSource.includes("if (!result || result.status !== \"ok\" || result.noop)"));
-    assert.ok(generalSource.includes("sessionHudSummaryLabels"));
-    assert.ok(generalSource.includes('key: "sessionHudShowStateLabels"'));
+    assert.ok(generalSource.includes("sessionHudSummaryCleanup"));
+    // 面板改版后，会话列表相关的三个开关必须从设置里消失
+    assert.ok(!generalSource.includes('key: "sessionHudShowStateLabels"'));
+    assert.ok(!generalSource.includes('key: "sessionHudShowElapsed"'));
+    assert.ok(!generalSource.includes('key: "sessionHudShowContextUsage"'));
     assert.ok(generalSource.includes("session-hud-summary-control"));
     assert.ok(/\.settings-option-list\s*\{[\s\S]*display:\s*grid;[\s\S]*gap:\s*8px;/.test(css));
     assert.ok(/\.settings-option-list \.settings-option-item\s*\{[\s\S]*background:\s*color-mix\(in srgb,\s*var\(--panel-bg\) 78%,\s*transparent\);/.test(css));
@@ -11532,32 +11535,24 @@ describe("settings renderer browser environment", () => {
     harness.renderContent();
 
     const master = harness.getSwitch("sessionHudEnabled");
-    const labels = harness.getSwitch("sessionHudShowStateLabels");
-    const elapsed = harness.getSwitch("sessionHudShowElapsed");
-    const contextUsage = harness.getSwitch("sessionHudShowContextUsage");
     const cleanup = harness.getSwitch("sessionHudCleanupDetached");
     const summary = harness.core.state.mountedControls.sessionHudSummary.element;
     const optionList = harness.content.querySelector(".session-hud-option-list");
     assert.ok(master);
-    assert.ok(labels);
-    assert.ok(elapsed);
-    assert.ok(contextUsage);
     assert.ok(cleanup);
     assert.ok(optionList);
+    // 会话列表被移除后，面板分组只剩总开关 + 会话清理两个开关
+    assert.strictEqual(harness.getSwitch("sessionHudShowStateLabels"), null);
+    assert.strictEqual(harness.getSwitch("sessionHudShowElapsed"), null);
+    assert.strictEqual(harness.getSwitch("sessionHudShowContextUsage"), null);
     assert.ok(optionList.children.every((child) => child.classList.contains("settings-option-item")));
     assert.strictEqual(harness.getSwitchMeta("sessionHudEnabled").row.querySelector(".row-desc"), null);
     assert.strictEqual(summary.children.length, 1);
-    assert.strictEqual(summary.children[0].textContent, "HUD: off");
+    assert.strictEqual(summary.children[0].textContent, "Panel: off");
     assert.strictEqual(summary.classList.contains("compact"), true);
-    assert.strictEqual(labels.classList.contains("disabled"), true);
-    assert.strictEqual(labels.attributes["aria-disabled"], "true");
-    assert.strictEqual(labels.tabIndex, -1);
-    assert.strictEqual(elapsed.classList.contains("disabled"), true);
-    assert.strictEqual(elapsed.attributes["aria-disabled"], "true");
-    assert.strictEqual(elapsed.tabIndex, -1);
-    assert.strictEqual(contextUsage.classList.contains("disabled"), true);
-    assert.strictEqual(contextUsage.attributes["aria-disabled"], "true");
-    assert.strictEqual(contextUsage.tabIndex, -1);
+    assert.strictEqual(cleanup.classList.contains("disabled"), true);
+    assert.strictEqual(cleanup.attributes["aria-disabled"], "true");
+    assert.strictEqual(cleanup.tabIndex, -1);
 
     const beforeRenderCount = harness.getContentRenderCount();
     harness.core.ops.applyChanges({
@@ -11571,38 +11566,24 @@ describe("settings renderer browser environment", () => {
       "Session HUD master broadcasts should patch mounted controls instead of rebuilding General"
     );
     assert.strictEqual(harness.getSwitch("sessionHudEnabled"), master);
-    assert.strictEqual(harness.getSwitch("sessionHudShowStateLabels"), labels);
-    assert.strictEqual(harness.getSwitch("sessionHudShowElapsed"), elapsed);
-    assert.strictEqual(harness.getSwitch("sessionHudShowContextUsage"), contextUsage);
     assert.strictEqual(harness.getSwitch("sessionHudCleanupDetached"), cleanup);
     assert.strictEqual(master.classList.contains("on"), true);
     assert.strictEqual(master.classList.contains("pending"), false);
-    assert.strictEqual(labels.classList.contains("disabled"), false);
-    assert.strictEqual(labels.attributes["aria-disabled"], "false");
-    assert.strictEqual(labels.tabIndex, 0);
-    assert.strictEqual(elapsed.classList.contains("disabled"), false);
-    assert.strictEqual(elapsed.attributes["aria-disabled"], "false");
-    assert.strictEqual(elapsed.tabIndex, 0);
-    assert.strictEqual(contextUsage.classList.contains("disabled"), false);
-    assert.strictEqual(contextUsage.attributes["aria-disabled"], "false");
-    assert.strictEqual(contextUsage.tabIndex, 0);
     assert.strictEqual(cleanup.classList.contains("disabled"), false);
+    assert.strictEqual(cleanup.attributes["aria-disabled"], "false");
     assert.strictEqual(cleanup.tabIndex, 0);
-    assert.strictEqual(summary.children.length, 4);
+    assert.strictEqual(summary.children.length, 1);
     assert.strictEqual(summary.classList.contains("compact"), false);
-    assert.strictEqual(summary.children[0].textContent, "Labels: on");
-    assert.strictEqual(summary.children[1].textContent, "Time: on");
-    assert.strictEqual(summary.children[2].textContent, "Context: on");
-    assert.strictEqual(summary.children[3].textContent, "Auto-clear: on");
+    assert.strictEqual(summary.children[0].textContent, "Auto-clear: on");
 
     assert.ok(
-      elapsed.eventListeners.click && elapsed.eventListeners.click.length > 0,
+      cleanup.eventListeners.click && cleanup.eventListeners.click.length > 0,
       "Session HUD child switches must remain wired after being enabled in place"
     );
-    elapsed.eventListeners.click[0]();
+    cleanup.eventListeners.click[0]();
     await Promise.resolve();
     await Promise.resolve();
-    assert.deepStrictEqual(updateCalls, [{ key: "sessionHudShowElapsed", value: false }]);
+    assert.deepStrictEqual(updateCalls, [{ key: "sessionHudCleanupDetached", value: false }]);
   });
 
   it("keeps the quota ring as an independent sibling of the Session HUD", async () => {
@@ -11644,7 +11625,7 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(mergeSources.classList.contains("disabled"), false);
     assert.strictEqual(harness.getSwitchMeta("quotaMergeSources").row.style.display, "");
     assert.strictEqual(summary.children.length, 1);
-    assert.strictEqual(summary.children[0].textContent, "HUD: off");
+    assert.strictEqual(summary.children[0].textContent, "Panel: off");
   });
 
   it("lets the user pick which providers draw beside the pet, hiding by exception", async () => {
@@ -12369,15 +12350,9 @@ describe("settings renderer browser environment", () => {
     harness.renderContent();
 
     const master = harness.getSwitch("sessionHudEnabled");
-    const labels = harness.getSwitch("sessionHudShowStateLabels");
-    const elapsed = harness.getSwitch("sessionHudShowElapsed");
     const cleanup = harness.getSwitch("sessionHudCleanupDetached");
     assert.ok(master);
-    assert.ok(labels);
-    assert.ok(elapsed);
     assert.ok(cleanup);
-    assert.strictEqual(labels.classList.contains("disabled"), false);
-    assert.strictEqual(elapsed.classList.contains("disabled"), false);
     assert.strictEqual(cleanup.classList.contains("disabled"), false);
 
     const beforeRenderCount = harness.getContentRenderCount();
@@ -12388,21 +12363,13 @@ describe("settings renderer browser environment", () => {
 
     assert.strictEqual(harness.getContentRenderCount(), beforeRenderCount);
     assert.strictEqual(harness.getSwitch("sessionHudEnabled"), master);
-    assert.strictEqual(harness.getSwitch("sessionHudShowStateLabels"), labels);
-    assert.strictEqual(harness.getSwitch("sessionHudShowElapsed"), elapsed);
     assert.strictEqual(harness.getSwitch("sessionHudCleanupDetached"), cleanup);
     assert.strictEqual(master.classList.contains("on"), false);
-    assert.strictEqual(labels.classList.contains("disabled"), true);
-    assert.strictEqual(labels.attributes["aria-disabled"], "true");
-    assert.strictEqual(labels.tabIndex, -1);
-    assert.strictEqual(elapsed.classList.contains("disabled"), true);
-    assert.strictEqual(elapsed.attributes["aria-disabled"], "true");
-    assert.strictEqual(elapsed.tabIndex, -1);
     assert.strictEqual(cleanup.classList.contains("disabled"), true);
     assert.strictEqual(cleanup.attributes["aria-disabled"], "true");
     assert.strictEqual(cleanup.tabIndex, -1);
 
-    elapsed.eventListeners.click[0]();
+    cleanup.eventListeners.click[0]();
     await Promise.resolve();
     await Promise.resolve();
     assert.deepStrictEqual(updateCalls, []);

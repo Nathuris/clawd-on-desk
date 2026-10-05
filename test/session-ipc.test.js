@@ -96,6 +96,8 @@ function createHarness(overrides = {}) {
           || ((reason, held) => { calls.push(["quickSetHold", reason, held]); }),
         quickSetMenuOpen: overrides.quickSetMenuOpen
           || ((open) => { calls.push(["quickSetMenuOpen", open]); return { status: "ok" }; }),
+        quickSetClickThrough: overrides.quickSetClickThrough
+          || ((through) => { calls.push(["quickSetClickThrough", through]); }),
       };
   // A supported-platform quick mode by default, so the shared channel set
   // reflects a darwin/win32 install.
@@ -222,6 +224,7 @@ test("session IPC registers owned channels and disposes them", () => {
   ]);
   assert.deepStrictEqual([...ipcMain.listeners.keys()].sort(), [
     "dashboard:focus-session",
+    "session-hud:set-click-through",
     "session-hud:set-hold",
     "settings:open-dashboard",
     "show-dashboard",
@@ -805,6 +808,24 @@ test("set-menu-open 只收布尔载荷，展开/收起都走 quickSetMenuOpen", 
     ),
     { status: "error", reason: "untrusted-hud-sender" }
   );
+  assert.deepStrictEqual(calls, []);
+});
+
+test("set-click-through 只认 HUD 主 frame，布尔化后交给 quickSetClickThrough", () => {
+  const { ipcMain, calls, trustedHudEvent, hudMainFrame } = createHarness();
+
+  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-click-through", { through: true });
+  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-click-through", { through: false });
+  // 非严格 true 一律按 false：穿透状态不能被奇怪的值打开
+  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-click-through", { through: "yes" });
+  assert.deepStrictEqual(calls, [
+    ["quickSetClickThrough", true],
+    ["quickSetClickThrough", false],
+    ["quickSetClickThrough", false],
+  ]);
+  calls.length = 0;
+
+  ipcMain.sendFrom({ sender: {}, senderFrame: hudMainFrame }, "session-hud:set-click-through", { through: true });
   assert.deepStrictEqual(calls, []);
 });
 

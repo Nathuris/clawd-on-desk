@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld("sessionHudAPI", {
   stopChat: () => ipcRenderer.invoke("session-hud:stop-chat"),
   // 二级菜单展开状态由主进程持有（窗口高度要跟着变）。
   setMenuOpen: (open) => ipcRenderer.invoke("session-hud:set-menu-open", { open: !!open }),
+  // 指针进出卡片：卡片外的透明区放行点击（单向、高频，用 send）。
+  setClickThrough: (through) => ipcRenderer.send("session-hud:set-click-through", { through: !!through }),
   setHold: (reason, held) => ipcRenderer.send("session-hud:set-hold", { reason, held }),
   onLangChange: (cb) => {
     if (typeof cb !== "function") return () => {};

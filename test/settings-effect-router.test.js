@@ -280,22 +280,6 @@ describe("settings-effect-router", () => {
     ]);
 
     calls.length = 0;
-    emit({ sessionHudShowStateLabels: false });
-    assert.deepStrictEqual(calls, [
-      ["updateMirrors", { sessionHudShowStateLabels: false }],
-      ["syncSessionHudVisibility"],
-      ["repositionFloatingBubbles"],
-    ]);
-
-    calls.length = 0;
-    emit({ sessionHudShowContextUsage: false });
-    assert.deepStrictEqual(calls, [
-      ["updateMirrors", { sessionHudShowContextUsage: false }],
-      ["syncSessionHudVisibility"],
-      ["repositionFloatingBubbles"],
-    ]);
-
-    calls.length = 0;
     emit({ sessionHudShowQuota: false });
     assert.deepStrictEqual(calls, [
       ["updateMirrors", { sessionHudShowQuota: false }],

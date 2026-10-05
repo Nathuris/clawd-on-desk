@@ -17,9 +17,6 @@
     "showTray",
     "showDock",
     "sessionHudEnabled",
-    "sessionHudShowStateLabels",
-    "sessionHudShowElapsed",
-    "sessionHudShowContextUsage",
     "sessionHudShowQuota",
     "quotaRingDisplayMode",
     "permissionAutomationMode",
@@ -79,17 +76,14 @@
     codexWorkingStaleMs: 1_200_000,
     detachedIdleStaleMs: 30_000,
   };
+  // 面板改版后只剩这两个开关：总开关 + 会话清理（后者管的是 Dashboard 的
+  // 会话列表清理，不是面板本身）。原来的「状态标签 / 耗时 / 上下文用量」
+  // 三个开关随会话列表一起废除了。
   const SESSION_HUD_CHILD_SWITCH_KEYS = [
-    "sessionHudShowStateLabels",
-    "sessionHudShowElapsed",
-    "sessionHudShowContextUsage",
     "sessionHudCleanupDetached",
   ];
   const SESSION_HUD_SUMMARY_KEYS = new Set([
     "sessionHudEnabled",
-    "sessionHudShowStateLabels",
-    "sessionHudShowElapsed",
-    "sessionHudShowContextUsage",
     "sessionHudCleanupDetached",
   ]);
   const BUBBLE_SECONDS_AUTO_COMMIT_DELAY_MS = 600;
@@ -1229,24 +1223,6 @@
         labelKey: "rowSessionHudMaster",
       }),
       helpers.buildSwitchRow({
-        key: "sessionHudShowStateLabels",
-        labelKey: "rowSessionHudStateLabels",
-        descKey: "rowSessionHudStateLabelsDesc",
-        disabled: !sessionHudControlsEnabled,
-      }),
-      helpers.buildSwitchRow({
-        key: "sessionHudShowElapsed",
-        labelKey: "rowSessionHudElapsed",
-        descKey: "rowSessionHudElapsedDesc",
-        disabled: !sessionHudControlsEnabled,
-      }),
-      helpers.buildSwitchRow({
-        key: "sessionHudShowContextUsage",
-        labelKey: "rowSessionHudContextUsage",
-        descKey: "rowSessionHudContextUsageDesc",
-        disabled: !sessionHudControlsEnabled,
-      }),
-      helpers.buildSwitchRow({
         key: "sessionHudCleanupDetached",
         labelKey: "rowSessionHudCleanupDetached",
         descKey: "rowSessionHudCleanupDetachedDesc",
@@ -1274,27 +1250,6 @@
         });
       }
       if (enabled) {
-        items.push({
-          text: t("sessionHudSummaryLabels").replace(
-            "{state}",
-            snapshot.sessionHudShowStateLabels !== false ? onLabel : offLabel
-          ),
-          accent: snapshot.sessionHudShowStateLabels !== false,
-        });
-        items.push({
-          text: t("sessionHudSummaryElapsed").replace(
-            "{state}",
-            snapshot.sessionHudShowElapsed !== false ? onLabel : offLabel
-          ),
-          accent: snapshot.sessionHudShowElapsed !== false,
-        });
-        items.push({
-          text: t("sessionHudSummaryContextUsage").replace(
-            "{state}",
-            snapshot.sessionHudShowContextUsage !== false ? onLabel : offLabel
-          ),
-          accent: snapshot.sessionHudShowContextUsage !== false,
-        });
         items.push({
           text: t("sessionHudSummaryCleanup").replace(
             "{state}",

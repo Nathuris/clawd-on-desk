@@ -294,6 +294,14 @@ function registerSessionIpc(options = {}) {
     if (rejected) return rejected;
     return hudAction(event, options.quickSetMenuOpen, [!!(payload && payload.open === true)]);
   });
+  // 指针进出卡片时上报：卡片外的透明区让点击穿透到下面的应用。
+  // 单向 send（高频、不需要回执），主进程侧另有轮询兜底。
+  on("session-hud:set-click-through", (event, payload) => {
+    if (!isTrustedHudEvent(event)) return;
+    if (typeof options.quickSetClickThrough === "function") {
+      options.quickSetClickThrough(!!(payload && payload.through === true));
+    }
+  });
   on("session-hud:set-hold", (event, payload) => {
     const rejected = rejectUntrustedHudEvent(event);
     if (rejected) return;

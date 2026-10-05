@@ -316,6 +316,43 @@ describe("二级设置菜单（主进程侧）", () => {
     assert.doesNotMatch(src, /panelResizeTimer|panelResizeAnimTimer|applyPendingPanelBounds|handleMenuSettled/);
   });
 
+  it("lets clicks through outside the card and takes them back inside it", () => {
+    assert.match(src, /function setClickThrough\(through\)/);
+    assert.match(src, /win\.setIgnoreMouseEvents\(true, \{ forward: true \}\)/);
+    assert.match(src, /win\.setIgnoreMouseEvents\(false\)/);
+    // 显示瞬间默认穿透：面板是点桌宠弹出的，指针不会正好在卡片上
+    const showFn = src.match(/function showPanel\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(showFn, "showPanel missing");
+    assert.match(showFn[0], /setClickThrough\(true\)/);
+    // 轮询兜底：指针在卡片内 → 收回穿透（渲染端的 mousemove 是快路径）
+    const pollFn = src.match(/function evaluateAutoHideCursorNow\([\s\S]*?\n  \}/);
+    assert.ok(pollFn, "evaluateAutoHideCursorNow missing");
+    assert.match(pollFn[0], /setClickThrough\(!insideCard\)/);
+    // 新窗口 / 窗口回收后穿透状态要重新应用
+    assert.match(src, /clickThrough = null;/);
+  });
+
+  it("wires the click-through fast path end to end", () => {
+    const preloadSrc = fs.readFileSync(
+      path.join(__dirname, "..", "src", "preload-session-hud.js"), "utf8"
+    );
+    const ipcSrc = fs.readFileSync(
+      path.join(__dirname, "..", "src", "session-ipc.js"), "utf8"
+    );
+    const rendererSrc = fs.readFileSync(
+      path.join(__dirname, "..", "src", "session-hud-renderer.js"), "utf8"
+    );
+    assert.match(preloadSrc, /setClickThrough: \(through\) => ipcRenderer\.send\("session-hud:set-click-through"/);
+    assert.match(ipcSrc, /on\("session-hud:set-click-through"/);
+    assert.match(ipcSrc, /options\.quickSetClickThrough/);
+    assert.match(mainSrc, /quickSetClickThrough,/);
+    assert.match(mainSrc, /_sessionHud\.setClickThrough/);
+    // 渲染端：指针进出卡片时上报（同一状态不重复发）
+    assert.match(rendererSrc, /document\.addEventListener\("mousemove"/);
+    assert.match(rendererSrc, /if \(!inside === lastClickThrough\) return;/);
+    assert.match(rendererSrc, /window\.sessionHudAPI\.setClickThrough\(!inside\)/);
+  });
+
   it("fades the panel in and out instead of popping", () => {
     assert.match(src, /function fadePanelIn\(/);
     assert.match(src, /function fadePanelOut\(/);

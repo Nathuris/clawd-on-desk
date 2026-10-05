@@ -1562,9 +1562,6 @@ let bubbleFollowPet = _settingsController.get("bubbleFollowPet");
 let bubbleFollowPreference = _settingsController.get("bubbleFollowPreference");
 let bubbleFixedCorner = _settingsController.get("bubbleFixedCorner");
 let sessionHudEnabled = _settingsController.get("sessionHudEnabled");
-let sessionHudShowStateLabels = _settingsController.get("sessionHudShowStateLabels");
-let sessionHudShowElapsed = _settingsController.get("sessionHudShowElapsed");
-let sessionHudShowContextUsage = _settingsController.get("sessionHudShowContextUsage");
 let sessionHudShowQuota = _settingsController.get("sessionHudShowQuota");
 let quotaRingDisplayMode = _settingsController.get("quotaRingDisplayMode");
 let quotaRingHiddenProviders = _settingsController.get("quotaRingHiddenProviders");
@@ -3116,9 +3113,6 @@ const _sessionHud = require("./session-hud")({
   get win() { return win; },
   get petHidden() { return petWindowRuntime.isPetEffectivelyHidden(); },
   get sessionHudEnabled() { return sessionHudEnabled; },
-  get sessionHudShowStateLabels() { return sessionHudShowStateLabels; },
-  get sessionHudShowElapsed() { return sessionHudShowElapsed; },
-  get sessionHudShowContextUsage() { return sessionHudShowContextUsage; },
   get sessionHudShowQuota() { return sessionHudShowQuota; },
   get quotaRingDisplayMode() { return quotaRingDisplayMode; },
   get quotaRingHiddenProviders() { return quotaRingHiddenProviders; },
@@ -4698,9 +4692,6 @@ const SETTINGS_MIRROR_SETTERS = {
   bubbleFollowPreference: (v) => { bubbleFollowPreference = v; },
   bubbleFixedCorner: (v) => { bubbleFixedCorner = v; },
   sessionHudEnabled: (v) => { sessionHudEnabled = v; },
-  sessionHudShowStateLabels: (v) => { sessionHudShowStateLabels = v; },
-  sessionHudShowElapsed: (v) => { sessionHudShowElapsed = v; },
-  sessionHudShowContextUsage: (v) => { sessionHudShowContextUsage = v; },
   sessionHudShowQuota: (v) => { sessionHudShowQuota = v; },
   quotaRingDisplayMode: (v) => { quotaRingDisplayMode = v; },
   // Normalized to an array here as well as in prefs: this mirror also takes the
@@ -5222,6 +5213,13 @@ function quickSetMenuOpen(open) {
   return { status: "ok" };
 }
 
+// 渲染端上报指针进出卡片：卡片外的透明区让点击穿透（主进程轮询另有兜底）。
+function quickSetClickThrough(through) {
+  if (_sessionHud && typeof _sessionHud.setClickThrough === "function") {
+    _sessionHud.setClickThrough(through === true);
+  }
+}
+
 function quickSetHold(reason, held) {
   if (_sessionHud && typeof _sessionHud.setHold === "function") {
     _sessionHud.setHold(reason, held);
@@ -5278,6 +5276,7 @@ registerSessionIpc({
   quickStopChat,
   quickSetHold,
   quickSetMenuOpen,
+  quickSetClickThrough,
   quickMode: _dashboard.quick,
   getKimiQuotaStatus: () => _kimiQuotaRuntime.getStatus(),
   refreshKimiQuota: () => _kimiQuotaRuntime.refresh(),

@@ -164,8 +164,8 @@ describe("pet-attached quota ring", () => {
 describe("快捷面板整卡（视觉外壳）", () => {
   it("卡片总高 134px，壳底留 30px 输入法净空", () => {
     // 主进程按「卡片 + 壳」算窗口尺寸（见 src/session-hud.js 顶部注释）：
-    // 6+16+4+28+4+0+4+28+4+32+6+2 = 134；窗口高 = 134 + 2 + 30 = 166。
-    assert.match(sessionHudHtml, /body \{[\s\S]*?padding:\s*2px 3px 30px;[\s\S]*?\}/);
+    // 6+16+4+28+4+0+4+28+4+32+6+2 = 134；窗口高 = 134 + 2 + 60 = 196。
+    assert.match(sessionHudHtml, /body \{[\s\S]*?padding:\s*2px 3px 60px;[\s\S]*?\}/);
     assert.match(sessionHudHtml, /\.quick-card \{ height: 134px; \}/);
   });
 
@@ -398,10 +398,10 @@ describe("面板窗口尺寸：主进程常量与 CSS 一致", () => {
 
   it("窗口壳：底 30（输入法净空），与 body padding 一致", () => {
     assert.equal(hudTest.QUICK_SHELL.top, 2);
-    assert.equal(hudTest.QUICK_SHELL.bottom, 30);
+    assert.equal(hudTest.QUICK_SHELL.bottom, 60);
     assert.equal(hudTest.QUICK_SHELL.left, 3);
     assert.equal(hudTest.QUICK_SHELL.right, 3);
-    assert.match(sessionHudHtml, /body \{[\s\S]*?padding:\s*2px 3px 30px;[\s\S]*?\}/);
+    assert.match(sessionHudHtml, /body \{[\s\S]*?padding:\s*2px 3px 60px;[\s\S]*?\}/);
   });
 
   it("卡片高度的算式成立（收起 134 / 展开 316）", () => {

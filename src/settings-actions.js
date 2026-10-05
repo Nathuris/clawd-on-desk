@@ -431,9 +431,6 @@ const updateRegistry = {
     "bottom-right",
   ]),
   sessionHudEnabled: requireBoolean("sessionHudEnabled"),
-  sessionHudShowStateLabels: requireBoolean("sessionHudShowStateLabels"),
-  sessionHudShowElapsed: requireBoolean("sessionHudShowElapsed"),
-  sessionHudShowContextUsage: requireBoolean("sessionHudShowContextUsage"),
   sessionHudShowQuota: requireBoolean("sessionHudShowQuota"),
   quotaRingDisplayMode: requireEnum("quotaRingDisplayMode", ["used", "remaining"]),
   // Shape only — the entries are provider keys, and deliberately not checked

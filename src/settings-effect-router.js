@@ -305,9 +305,6 @@ function createSettingsEffectRouter(options = {}) {
     }
     if (
       "sessionHudEnabled" in changes
-      || "sessionHudShowStateLabels" in changes
-      || "sessionHudShowElapsed" in changes
-      || "sessionHudShowContextUsage" in changes
       || "sessionHudShowQuota" in changes
       || "quotaRingDisplayMode" in changes
       // Hiding a provider changes the COIN COUNT, so this has to re-measure and
