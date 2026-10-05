@@ -4,12 +4,17 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 // 新建会话的两个开关：允许值表与主进程拼启动参数用的是同一份，不另抄一遍。
 const { PERMISSION_MODES, EFFORT_LEVELS } = require("./session-new-options");
+// 粘贴文件的字节上限也共用一份（主进程落盘时还会再卡一次）。
+const { MAX_PASTED_BYTES } = require("./pasted-file-store");
 
 const DASHBOARD_PAGE_URL = pathToFileURL(path.join(__dirname, "dashboard.html")).toString();
 const SESSION_HUD_PAGE_URL = pathToFileURL(path.join(__dirname, "session-hud.html")).toString();
 
 // 输入框文本上限：一句话，远不至于要 10 万字符（投递层另有 2000 的更紧上限）。
 const QUICK_PROMPT_MAX_LENGTH = 100000;
+// 附件个数的上限：面板自己最多挂 4 个，这里给一个宽松的天花板，只用来挡脏数据
+// （数字一变主进程就要重算窗口高度）。
+const MAX_QUICK_ATTACHMENTS = 8;
 
 function requiredDependency(value, name) {
   if (!value) throw new Error(`registerSessionIpc requires ${name}`);
@@ -296,6 +301,32 @@ function registerSessionIpc(options = {}) {
     if (rejected) return rejected;
     return hudAction(event, options.quickPickFolder);
   });
+  // 「📎 添加文件」：系统选文件框，返回绝对路径（面板把它填进输入框）。
+  handle("session-hud:pick-file", (event) => {
+    const rejected = rejectUntrustedHudEvent(event);
+    if (rejected) return rejected;
+    return hudAction(event, options.quickPickFiles);
+  });
+  // 粘贴进来的图片/文件：渲染端把字节交过来，主进程落成临时文件并回路径。
+  // 字节是二进制的，形状和大小都要在这道闸门里卡死，别让渲染端塞别的东西。
+  handle("session-hud:save-pasted-file", (event, payload) => {
+    const rejected = rejectUntrustedHudEvent(event);
+    if (rejected) return rejected;
+    const keys = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? Object.keys(payload).sort()
+      : [];
+    if (keys.length !== 3 || keys[0] !== "data" || keys[1] !== "name" || keys[2] !== "type") {
+      return { status: "invalid" };
+    }
+    if (typeof payload.name !== "string" || payload.name.length > 200) return { status: "invalid" };
+    if (typeof payload.type !== "string" || payload.type.length > 200) return { status: "invalid" };
+    const bytes = payload.data;
+    const byteLength = bytes && typeof bytes.byteLength === "number" ? bytes.byteLength : -1;
+    if (byteLength <= 0) return { status: "invalid" };
+    if (byteLength > MAX_PASTED_BYTES) return { status: "too-large" };
+    return hudAction(event, options.quickSavePastedFile, [payload]);
+  });
+
   // 切「新建会话」的权限模式 / 思考强度。这两个值会变成 claude 的启动参数，
   // 所以按「键 → 允许值」表逐项卡形状：表是唯一入口，别的字符串一律 invalid。
   const NEW_SESSION_OPTION_VALUES = {
@@ -322,6 +353,14 @@ function registerSessionIpc(options = {}) {
     if (typeof options.quickSetClickThrough === "function") {
       options.quickSetClickThrough(!!(payload && payload.through === true));
     }
+  });
+  // 输入框上挂了几个附件（面板那边挂 / 删 / 清之后上报）。附件本身留在渲染端，
+  // 主进程只要这个数字：卡片要不要多出一行标签、面板要不要因此不自动收起。
+  on("session-hud:set-attachments", (event, payload) => {
+    if (!isTrustedHudEvent(event)) return;
+    const count = payload && typeof payload.count === "number" ? payload.count : null;
+    if (count === null || !Number.isInteger(count) || count < 0 || count > MAX_QUICK_ATTACHMENTS) return;
+    if (typeof options.quickSetAttachments === "function") options.quickSetAttachments(count);
   });
   on("session-hud:set-hold", (event, payload) => {
     const rejected = rejectUntrustedHudEvent(event);

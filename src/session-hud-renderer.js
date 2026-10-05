@@ -34,6 +34,14 @@ let statusTextEl = null;
 let targetBtnEl = null;
 let sessionListEl = null;
 let promptInputEl = null;
+let attachBtnEl = null;
+let attachRowEl = null;
+
+// 挂在输入框上的附件（发送时跟着消息一起走）。路径不进输入框——一长串路径
+// 挤在里面就没法打字了，所以在这儿存着，界面上只显示文件名。
+// 只有这份状态在渲染端：主进程只要一个数字（几个附件）来决定卡片多高。
+const MAX_ATTACHMENTS = 4;
+let attachments = [];
 // 卡片节点 + 上一次上报的穿透状态：指针进出卡片时通知主进程切换
 let cardEl = null;
 let lastClickThrough = null;
@@ -366,6 +374,8 @@ function createInputRow() {
   promptInputEl.type = "text";
   promptInputEl.className = "quick-input";
   promptInputEl.addEventListener("keydown", handleInputKeydown);
+  // 剪贴板里是图片/文件时，把它变成路径填进来（见 handlePaste）
+  promptInputEl.addEventListener("paste", handlePaste);
   // 聚焦 / 有草稿时让面板保持显示（hold 由主进程解释）
   promptInputEl.addEventListener("focus", () => {
     window.sessionHudAPI.setHold("focus", true);
@@ -374,11 +384,184 @@ function createInputRow() {
     window.sessionHudAPI.setHold("focus", false);
   });
   promptInputEl.addEventListener("input", () => {
-    window.sessionHudAPI.setHold("draft", promptInputEl.value.length > 0);
+    window.sessionHudAPI.setHold("draft", promptInputEl.value.length > 0 || attachments.length > 0);
   });
 
   inputRow.appendChild(promptInputEl);
+
+  const attachBtn = document.createElement("button");
+  attachBtn.type = "button";
+  attachBtn.className = "quick-attach-btn";
+  attachBtn.textContent = "📎";
+  attachBtn.addEventListener("click", handleAttachFile);
+  inputRow.appendChild(attachBtn);
+  attachBtnEl = attachBtn;
+
   return inputRow;
+}
+
+/* ===== 加文件：选文件 / 粘贴图片 ===== */
+
+// 路径里带空格或引号的，拼进消息时包成双引号——不然 Claude 会把它读成几个词。
+function formatPathForInput(value) {
+  const text = String(value || "");
+  if (!text) return "";
+  return /[\s"]/.test(text) ? `"${text.replace(/"/g, '\\"')}"` : text;
+}
+
+// 路径的最后一段当显示名（渲染端拿不到 node 的 path，按分隔符切就够了）。
+function fileNameFor(path) {
+  const text = String(path || "");
+  const parts = text.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : text;
+}
+
+// 挂上文件。重复的路径不再挂第二遍；超过上限的丢掉并说一声。
+function addAttachments(paths) {
+  const incoming = (Array.isArray(paths) ? paths : [paths])
+    .filter((item) => typeof item === "string" && item)
+    .map((item) => ({ path: item, name: fileNameFor(item) }));
+  let rejected = 0;
+  for (const item of incoming) {
+    if (attachments.length >= MAX_ATTACHMENTS) {
+      rejected += 1;
+      continue;
+    }
+    if (attachments.some((existing) => existing.path === item.path)) continue;
+    attachments.push(item);
+  }
+  syncAttachments();
+  if (rejected) showQuickFeedback(t("hudQuickAttachLimit").replace("{n}", String(MAX_ATTACHMENTS)), true);
+}
+
+function removeAttachment(path) {
+  const next = attachments.filter((item) => item.path !== path);
+  if (next.length === attachments.length) return;
+  attachments = next;
+  syncAttachments();
+}
+
+// 附件变了：重画标签行 + 告诉主进程「现在挂了几个」（卡片高度要跟着变）
+// + 按住面板（还挂着东西没发出去，别让它自己收起、更别让窗口被回收）。
+function syncAttachments() {
+  const count = attachments.length;
+  renderAttachments();
+  try {
+    window.sessionHudAPI.setAttachments(count);
+  } catch (err) {
+    console.warn("set attachments threw:", err);
+  }
+  window.sessionHudAPI.setHold("draft", count > 0 || !!(promptInputEl && promptInputEl.value));
+}
+
+// 一行标签：每个附件显示 📎 + 文件名 + ✕。没有附件时整行不占位置。
+function createAttachRow() {
+  attachRowEl = document.createElement("div");
+  attachRowEl.className = "quick-attach-row is-empty";
+  return attachRowEl;
+}
+
+function renderAttachments() {
+  if (!attachRowEl) return;
+  const nodes = attachments.map((item) => {
+    const chip = document.createElement("span");
+    chip.className = "quick-attach-chip";
+    chip.setAttribute("data-attachment-path", item.path);
+    chip.title = item.path;
+
+    const icon = document.createElement("span");
+    icon.textContent = "📎";
+    chip.appendChild(icon);
+
+    const nameEl = document.createElement("span");
+    nameEl.className = "quick-attach-name";
+    nameEl.textContent = item.name;
+    chip.appendChild(nameEl);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "quick-attach-remove";
+    remove.textContent = "✕";
+    const label = t("hudQuickAttachRemove");
+    remove.setAttribute("aria-label", label);
+    remove.title = label;
+    remove.addEventListener("click", () => {
+      removeAttachment(item.path);
+      // 点 ✕ 会把焦点从输入框抢走，交回去，免得面板的「聚焦中」状态断掉
+      if (promptInputEl && typeof promptInputEl.focus === "function") promptInputEl.focus();
+    });
+    chip.appendChild(remove);
+
+    return chip;
+  });
+  attachRowEl.replaceChildren(...nodes);
+  attachRowEl.classList.toggle("is-empty", nodes.length === 0);
+  // 卡片高度靠这个 class（CSS）和主进程的 quickCardHeight 同源于同一个判断
+  if (document.body) document.body.classList.toggle("has-attachments", nodes.length > 0);
+}
+
+async function handleAttachFile() {
+  try {
+    const result = await window.sessionHudAPI.pickFiles();
+    if (!result || result.status !== "ok" || !Array.isArray(result.paths) || !result.paths.length) {
+      // 用户点了取消：什么都不说
+      if (result && result.status === "error") showQuickFeedback(t("hudQuickAttachFailed"), true);
+      return;
+    }
+    addAttachments(result.paths);
+  } catch (err) {
+    console.warn("pick files threw:", err);
+    showQuickFeedback(t("hudQuickAttachFailed"), true);
+  }
+}
+
+// 粘贴：剪贴板里是文件（从 Finder 拷的、或截图）就换成路径填进来；
+// 是纯文字就什么都不做，让浏览器自己把它插进输入框。
+async function handlePaste(event) {
+  const clipboard = event && event.clipboardData;
+  const items = clipboard && clipboard.items ? clipboard.items : null;
+  if (!items || typeof items.length !== "number") return;
+  const files = [];
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    if (!item || item.kind !== "file" || typeof item.getAsFile !== "function") continue;
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  if (!files.length) return;
+  event.preventDefault();
+  const paths = [];
+  for (const file of files) {
+    const path = await resolveFileObjectPath(file);
+    if (path) paths.push(path);
+  }
+  if (paths.length) addAttachments(paths);
+}
+
+// 有真实路径的（Finder 里拷的）直接用那个路径；没有的（截图、网页里的图）
+// 把字节交给主进程存成临时文件，再拿那条路径。拿不到就返回空串。
+async function resolveFileObjectPath(file) {
+  try {
+    const existing = window.sessionHudAPI.pathForFile ? window.sessionHudAPI.pathForFile(file) : "";
+    if (existing) return existing;
+    const data = typeof file.arrayBuffer === "function" ? await file.arrayBuffer() : null;
+    if (!data) {
+      showQuickFeedback(t("hudQuickPastedFileFailed"), true);
+      return "";
+    }
+    const result = await window.sessionHudAPI.savePastedFile({
+      name: file.name || "paste",
+      type: file.type || "",
+      data,
+    });
+    if (result && result.status === "ok" && result.path) return result.path;
+    showQuickFeedback(t("hudQuickPastedFileFailed"), true);
+    return "";
+  } catch (err) {
+    console.warn("save pasted file threw:", err);
+    showQuickFeedback(t("hudQuickPastedFileFailed"), true);
+    return "";
+  }
 }
 
 function handleInputKeydown(event) {
@@ -401,17 +584,28 @@ const SEND_RESULT_KEYS = {
 
 // 回车发送：真的进了终端 → 清空输入框并提示；只落到剪贴板 → 保留文字（剪贴板
 // 里也有一份，不会丢）并如实告诉用户去粘贴。
+// 发出去的那条消息 = 你打的字 + 各附件的路径（含空格的加引号）。
+// 终端那边只认文字，所以路径必须跟着消息走；只挂附件不写字也发得出去。
+function composePromptText(text) {
+  const typed = typeof text === "string" ? text.trim() : "";
+  return [typed, ...attachments.map((item) => formatPathForInput(item.path))]
+    .filter(Boolean)
+    .join(" ");
+}
+
 async function handleSendPrompt() {
   if (!promptInputEl) return;
-  const text = promptInputEl.value;
-  if (!text || !text.trim()) return; // 空白不发送
+  const outgoing = composePromptText(promptInputEl.value);
+  if (!outgoing) return; // 没字也没附件：什么都不发
   try {
-    const result = await window.sessionHudAPI.sendPrompt(text);
+    const result = await window.sessionHudAPI.sendPrompt(outgoing);
     const status = result && result.status;
     const textKey = (result && result.textKey) || SEND_RESULT_KEYS[status] || "hudQuickSendFailed";
     if (status === "ok") {
       promptInputEl.value = "";
-      window.sessionHudAPI.setHold("draft", false);
+      // 真送进去了才清附件；只落到剪贴板（copied）或出错时都留着，不让人白挂一遍
+      attachments = [];
+      syncAttachments();
     }
     showQuickFeedback(t(textKey), status !== "ok");
   } catch (err) {
@@ -500,8 +694,17 @@ function refreshTexts() {
     const placeholder = t("hudQuickPlaceholder");
     if (promptInputEl.placeholder !== placeholder) promptInputEl.placeholder = placeholder;
   }
+  if (attachBtnEl) {
+    const label = t("hudQuickAttachFile");
+    if (attachBtnEl.getAttribute("aria-label") !== label) {
+      attachBtnEl.setAttribute("aria-label", label);
+      attachBtnEl.title = label;
+    }
+  }
   updateStatusRow();
   updateSessionList();
+  // ✕ 的提示语按语言重画一遍（不重建输入框，焦点与草稿都不动）
+  renderAttachments();
 }
 
 function buildPanel() {
@@ -511,6 +714,8 @@ function buildPanel() {
   cardEl = card;
   card.appendChild(createStatusRow());
   card.appendChild(createSessionList());
+  // 附件标签行在输入框上面、列表下面：挂着的文件紧挨着你要打的那句话
+  card.appendChild(createAttachRow());
   card.appendChild(createInputRow());
   hudEl.appendChild(card);
 }
@@ -518,6 +723,9 @@ function buildPanel() {
 async function init() {
   // 先把 DOM 搭出来，文案等 i18n 到了再填
   buildPanel();
+  // 面板这一份脚本是全新的（窗口重建时），附件自然是 0：主动报一次，
+  // 免得主进程还留着上次的数字——那会让卡片一直偏高、面板再也不自动收起。
+  syncAttachments();
 
   window.sessionHudAPI.onLangChange((payload) => {
     i18nPayload = payload || i18nPayload;

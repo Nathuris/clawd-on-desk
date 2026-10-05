@@ -73,6 +73,13 @@ body { padding: 2px 3px 60px; }
    和当初的二级菜单一样，展开时靠 overflow:hidden 裁切、卡片只往上长。 */
 body.session-list-open .quick-card { height: 320px; }
 
+/* 挂了附件：多一行 24px 的小标签（输入框上方），再加卡片自己的一个行距 4。
+   多出来的高度同样往上长，输入框的位置一动不动。
+   这两条必须排在前面两条之后（同特异性、后者胜）；主进程那边由
+   src/session-hud.js 的 quickCardHeight(listOpen, hasAttachments) 算同一个数。 */
+body.has-attachments .quick-card { height: 94px; }
+body.session-list-open.has-attachments .quick-card { height: 348px; }
+
 /* ===== 状态行（第 1 行，16px 单行省略） ===== */
 .quick-status-row {
   height: 16px;
@@ -252,6 +259,58 @@ body.session-list-open .quick-session-list { height: 250px; }
   color: #fff;
 }
 
+/* ===== 附件小标签行（24px，只在挂了文件时占位） =====
+   路径不往输入框里塞：这里每个标签显示文件名 + ✕（单删），发送时路径跟着消息走。 */
+.quick-attach-row {
+  height: 24px;
+  flex: 0 0 24px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+.quick-attach-row.is-empty { display: none; }
+
+.quick-attach-chip {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 2px 0 6px;
+  border-radius: 5px;
+  background: rgba(127, 127, 127, 0.14);
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.quick-attach-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-attach-remove {
+  flex: 0 0 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.quick-attach-remove:hover { background: rgba(127, 127, 127, 0.24); color: var(--text); }
+.quick-attach-remove:focus-visible { outline: 2px solid rgba(59, 130, 246, 0.6); outline-offset: 1px; }
+
 /* ===== 输入行（第 2 行，32px：输入框） ===== */
 .quick-input-row {
   height: 32px;
@@ -286,6 +345,23 @@ body.session-list-open .quick-session-list { height: 250px; }
   border-color: rgba(59, 130, 246, 0.55);
   background: rgba(59, 130, 246, 0.08);
 }
+
+/* 「📎 添加文件…」：把文件路径填进输入框（面板只往终端里送文字） */
+.quick-attach-btn {
+  flex: 0 0 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.quick-attach-btn:hover { background: rgba(127, 127, 127, 0.18); }
+.quick-attach-btn:focus-visible { outline: 2px solid rgba(59, 130, 246, 0.6); outline-offset: 1px; }
 
 /* 键盘 Tab 导航时的焦点圈由各控件自己的 :focus-visible 提供，
    鼠标点击不显示系统默认的焦点环（macOS 上那圈黄边）。 */

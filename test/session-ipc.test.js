@@ -1,6 +1,7 @@
 "use strict";
 
 const test = require("node:test");
+const { MAX_PASTED_BYTES } = require("../src/pasted-file-store");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -92,6 +93,10 @@ function createHarness(overrides = {}) {
           || (() => { calls.push(["quickCancelPendingSession"]); return { status: "ok" }; }),
         quickPickFolder: overrides.quickPickFolder
           || (() => { calls.push(["quickPickFolder"]); return { status: "ok" }; }),
+        quickPickFiles: overrides.quickPickFiles
+          || (() => { calls.push(["quickPickFiles"]); return { status: "ok", paths: ["/tmp/a.png"] }; }),
+        quickSavePastedFile: overrides.quickSavePastedFile
+          || ((payload) => { calls.push(["quickSavePastedFile", payload]); return { status: "ok", path: "/tmp/p.png" }; }),
         quickSetNewSessionOption: overrides.quickSetNewSessionOption
           || ((key, value) => {
             calls.push(["quickSetNewSessionOption", key, value]);
@@ -103,6 +108,8 @@ function createHarness(overrides = {}) {
           || ((reason, held) => { calls.push(["quickSetHold", reason, held]); }),
         quickSetClickThrough: overrides.quickSetClickThrough
           || ((through) => { calls.push(["quickSetClickThrough", through]); }),
+        quickSetAttachments: overrides.quickSetAttachments
+          || ((count) => { calls.push(["quickSetAttachments", count]); }),
       };
   // A supported-platform quick mode by default, so the shared channel set
   // reflects a darwin/win32 install.
@@ -221,7 +228,9 @@ test("session IPC registers owned channels and disposes them", () => {
     "session-hud:cancel-pending-session",
     "session-hud:get-i18n",
     "session-hud:new-session",
+    "session-hud:pick-file",
     "session-hud:pick-folder",
+    "session-hud:save-pasted-file",
     "session-hud:select-session",
     "session-hud:send-prompt",
     "session-hud:set-list-open",
@@ -230,6 +239,7 @@ test("session IPC registers owned channels and disposes them", () => {
   ]);
   assert.deepStrictEqual([...ipcMain.listeners.keys()].sort(), [
     "dashboard:focus-session",
+    "session-hud:set-attachments",
     "session-hud:set-click-through",
     "session-hud:set-hold",
     "settings:open-dashboard",
@@ -780,6 +790,85 @@ test("set-new-session-option 的载荷闸门：键与值都必须在允许表里
     ["quickSetNewSessionOption", "permissionMode", "plan"],
     ["quickSetNewSessionOption", "effort", "high"],
   ]);
+});
+
+test("pick-file 只认 HUD 主 frame，并把路径交回渲染端", async () => {
+  const { ipcMain, calls, trustedHudEvent, hudWebContents, hudMainFrame } = createHarness();
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:pick-file"),
+    { status: "ok", paths: ["/tmp/a.png"] }
+  );
+  assert.deepStrictEqual(calls, [["quickPickFiles"]]);
+
+  const forged = { sender: hudWebContents, senderFrame: { ...hudMainFrame } };
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(forged, "session-hud:pick-file"),
+    { status: "error", reason: "untrusted-hud-sender" }
+  );
+});
+
+test("save-pasted-file 的载荷闸门：形状、大小都要过关", async () => {
+  const { ipcMain, calls, trustedHudEvent } = createHarness();
+  const okPayload = { name: "shot.png", type: "image/png", data: new Uint8Array([1, 2, 3]) };
+
+  const bad = [
+    undefined,
+    null,
+    "x",
+    [],
+    { name: "a", type: "b" },
+    { name: "a", type: "b", data: new Uint8Array([1]), extra: 1 },
+    { name: 1, type: "b", data: new Uint8Array([1]) },
+    { name: "a", type: 2, data: new Uint8Array([1]) },
+    { name: "a", type: "b", data: "not-bytes" },
+    { name: "a", type: "b", data: new Uint8Array([]) },
+    { name: "a".repeat(201), type: "b", data: new Uint8Array([1]) },
+  ];
+  for (const payload of bad) {
+    assert.deepStrictEqual(
+      await ipcMain.invokeFrom(trustedHudEvent, "session-hud:save-pasted-file", payload),
+      { status: "invalid" },
+      JSON.stringify(payload && payload.name)
+    );
+  }
+  // 大小上限共用一份：正好的过了，超一点点的被挡在 owner 之前
+  const edge = await ipcMain.invokeFrom(trustedHudEvent, "session-hud:save-pasted-file", {
+    name: "a.png", type: "image/png", data: new Uint8Array(MAX_PASTED_BYTES),
+  });
+  assert.strictEqual(edge.status, "ok");
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:save-pasted-file", {
+      name: "a.png", type: "image/png", data: new Uint8Array(MAX_PASTED_BYTES + 1),
+    }),
+    { status: "too-large" }
+  );
+
+  calls.length = 0;
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:save-pasted-file", okPayload),
+    { status: "ok", path: "/tmp/p.png" }
+  );
+  assert.deepStrictEqual(calls, [["quickSavePastedFile", okPayload]]);
+});
+
+test("set-attachments 只认 HUD 主 frame，且只收 0..8 的整数", async () => {
+  const { ipcMain, calls, trustedHudEvent, hudWebContents, hudMainFrame } = createHarness();
+
+  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-attachments", { count: 2 });
+  assert.deepStrictEqual(calls, [["quickSetAttachments", 2]]);
+  calls.length = 0;
+
+  // 脏数据一律不触达 owner（数字一变主进程就要重算窗口高度）
+  for (const count of [undefined, null, "2", 2.5, -1, 9, NaN, Infinity]) {
+    ipcMain.sendFrom(trustedHudEvent, "session-hud:set-attachments", { count });
+  }
+  ipcMain.sendFrom(trustedHudEvent, "session-hud:set-attachments", undefined);
+  assert.deepStrictEqual(calls, []);
+
+  // 伪造 sender 什么都不该发生
+  const forged = { sender: hudWebContents, senderFrame: { ...hudMainFrame } };
+  ipcMain.sendFrom(forged, "session-hud:set-attachments", { count: 3 });
+  assert.deepStrictEqual(calls, []);
 });
 
 test("new-session / pick-folder 只认 HUD 主 frame", async () => {

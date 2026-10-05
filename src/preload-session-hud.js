@@ -1,6 +1,6 @@
 "use strict";
 
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 const langListeners = new Set();
 const quickStateListeners = new Set();
@@ -28,6 +28,19 @@ contextBridge.exposeInMainWorld("sessionHudAPI", {
   newSession: () => ipcRenderer.invoke("session-hud:new-session"),
   // 取消排好的新会话占位。
   cancelPendingSession: () => ipcRenderer.invoke("session-hud:cancel-pending-session"),
+  // 「📎 添加文件」：系统选文件框，回来的是绝对路径。
+  pickFiles: () => ipcRenderer.invoke("session-hud:pick-file"),
+  // 粘贴的图片/文件：字节交给主进程落成临时文件，回来的是路径。
+  savePastedFile: (payload) => ipcRenderer.invoke("session-hud:save-pasted-file", payload),
+  // 剪贴板里的东西本来就来自磁盘时（从 Finder 拷的文件）拿它的真实路径；
+  // 截图这类没有路径的返回空串。webUtils 只能在 preload 里用，所以从这里转出去。
+  pathForFile: (file) => {
+    try {
+      return webUtils.getPathForFile(file) || "";
+    } catch {
+      return "";
+    }
+  },
   // 选「新建会话」落在哪个文件夹（主进程弹系统文件夹选择框）。
   pickFolder: () => ipcRenderer.invoke("session-hud:pick-folder"),
   // 切「新建会话」的权限模式 / 思考强度（key ∈ permissionMode / effort）。
@@ -36,6 +49,8 @@ contextBridge.exposeInMainWorld("sessionHudAPI", {
   // 指针进出卡片：卡片外的透明区放行点击（单向、高频，用 send）。
   setClickThrough: (through) => ipcRenderer.send("session-hud:set-click-through", { through: !!through }),
   setHold: (reason, held) => ipcRenderer.send("session-hud:set-hold", { reason, held }),
+  // 挂了几个附件（决定卡片要多高、面板要不要因此不自动收起），同样不需要回执。
+  setAttachments: (count) => ipcRenderer.send("session-hud:set-attachments", { count }),
   onLangChange: (cb) => {
     if (typeof cb !== "function") return () => {};
     langListeners.add(cb);

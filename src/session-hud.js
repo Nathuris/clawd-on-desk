@@ -36,6 +36,16 @@ const QUICK_CARD = Object.freeze({ width: 300, height: 66 });
 // ＋ 权限模式（34）＋ 思考强度（34）＋ 选文件夹（28），行距一律 2：
 // 4×28 + 28 + 34 + 34 + 28 + 7×2 = 250，再加一个卡片行距 4 → 66 + 250 + 4 = 320。
 const QUICK_CARD_EXPANDED = Object.freeze({ width: 300, height: 320 });
+// 挂了附件时多出来的一行小标签：行高 24 + 卡片自己的一个行距 4 = 28。
+// 这一行插在会话列表和输入行之间，所以多出来的高度全往上长，输入框不动。
+const QUICK_ATTACH_ROW = Object.freeze({ height: 24 });
+const QUICK_ATTACH_EXTRA = QUICK_ATTACH_ROW.height + 4;
+// 卡片该多高：展开列表 +254、挂附件 +28，两者可叠加（数字必须和 session-hud.html
+// 的 .quick-card / .quick-attach-row 一一对应）。
+function quickCardHeight(listOpen, hasAttachments) {
+  const base = listOpen ? QUICK_CARD_EXPANDED.height : QUICK_CARD.height;
+  return base + (hasAttachments ? QUICK_ATTACH_EXTRA : 0);
+}
 // 底部 60px 是输入法候选窗的净空：太小的话 macOS 会认为「光标下面放不下」，
 // 把候选窗翻到输入框上方，结果被卡片盖住。
 const QUICK_SHELL = Object.freeze({ top: 2, right: 3, bottom: 60, left: 3 });
@@ -292,6 +302,9 @@ module.exports = function initSessionHud(ctx) {
   // 会话列表是否展开：展开时卡片更高，且 holdReasons 里钉一个 "menu"
   // 让面板不被自动收起（用户正在挑会话）。
   let sessionListOpen = false;
+  // 输入框上挂了几个附件（渲染端持有附件本身，只把这个数字报上来）。
+  // 它决定卡片要不要多出一行标签，所以窗口几何这边必须知道。
+  let attachmentCount = 0;
   // 回复窗口的自动消失状态：replyRevealed = 我们让它显示；replyHoldUntil =
   // 宽限/「刚回复完」的停留截止时间；replyWasBusy 用来识别「回复刚结束」这个边沿。
   let replyRevealed = false;
@@ -482,7 +495,7 @@ module.exports = function initSessionHud(ctx) {
     const panelLayout = computeBlockBounds({
       hitRect, anchorRect: stackedAnchorRect, workArea,
       cardW: QUICK_CARD.width,
-      cardH: sessionListOpen ? QUICK_CARD_EXPANDED.height : QUICK_CARD.height,
+      cardH: quickCardHeight(sessionListOpen, attachmentCount > 0),
       // 展开态以收起态的底边为基准向上长（只向上延伸，不向下撑）
       baseCardH: QUICK_CARD.height,
       shell: QUICK_SHELL, prefer: "left", scale, widthScale,
@@ -548,9 +561,11 @@ module.exports = function initSessionHud(ctx) {
     }
     const scale = getTextScale();
     const expected = computeExpectedLayout(scale);
-    // 输入框聚焦 / 有草稿（holdReasons）视同在热区内：打字到一半面板不能溜。
+    // 输入框聚焦 / 有草稿 / 挂了附件（holdReasons）视同在热区内：打字到一半、
+    // 或者还挂着文件没发出去，面板都不能溜。附件不走 holdReasons（窗口重建时
+    // 那份集合会被清空、没人补），直接用 attachmentCount 派生。
     // 这条判定不依赖光标位置——getCursorScreenPoint 偶发失败时 hold 也要保活。
-    let inHotZone = holdReasons.size > 0;
+    let inHotZone = holdReasons.size > 0 || attachmentCount > 0;
     if (cursor) {
       const hotZone = computeAutoHideHotZone({
         petHitRect: expected && expected.hitRect,
@@ -1181,6 +1196,20 @@ module.exports = function initSessionHud(ctx) {
     return sessionListOpen;
   }
 
+  // 输入框上挂了几个附件（渲染端持有附件本身，只把这个数字报上来）。
+  // 数字一变就得同步一次窗口几何，否则多出来的标签行会被窗口裁掉、点不到。
+  function setAttachments(count) {
+    const next = Number.isFinite(count) ? Math.min(Math.max(Math.floor(count), 0), 8) : 0;
+    if (next === attachmentCount) return;
+    attachmentCount = next;
+    syncSessionHud(latestSnapshot || getCurrentSnapshot(), {});
+    if (typeof ctx.onQuickStateChanged === "function") ctx.onQuickStateChanged();
+  }
+
+  function getAttachmentCount() {
+    return attachmentCount;
+  }
+
   // 回复窗口跟随时的高度（0 = 没开窗口、或不在跟随模式）。面板据此给整条让位：
   // 卡片整体下移「回复窗口高度 / 2」，让「窗口 + 卡片」这条竖条以桌宠为中心。
   function getAttachedReplyHeight() {
@@ -1326,6 +1355,7 @@ module.exports = function initSessionHud(ctx) {
     pendingHiddenBounds = null;
     clickThrough = null;
     sessionListOpen = false;
+    attachmentCount = 0;
     holdReasons.delete("menu");
     const win = panel.win;
     if (win && !win.isDestroyed()) win.destroy();
@@ -1347,6 +1377,8 @@ module.exports = function initSessionHud(ctx) {
     getPanelCardRect,
     setSessionListOpen,
     isSessionListOpen,
+    setAttachments,
+    getAttachmentCount,
     noteReplyWindowStateChanged,
     cleanup,
     getWindow: () => panel.win,
@@ -1372,6 +1404,9 @@ module.exports = function initSessionHud(ctx) {
 module.exports.__test = {
   QUICK_CARD,
   QUICK_CARD_EXPANDED,
+  QUICK_ATTACH_ROW,
+  QUICK_ATTACH_EXTRA,
+  quickCardHeight,
   QUICK_SHELL,
   computeBlockBounds,
   evaluateBaseEligible,

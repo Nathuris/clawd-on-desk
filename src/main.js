@@ -1105,6 +1105,8 @@ function loadChatBackfill(sessionId) {
 let lastSessionSnapshot = null;
 let terminalAppSender = null;
 let sessionPromptSend = null;
+// 面板里粘贴进来的图片：落成临时文件再要路径（见 src/pasted-file-store.js）。
+let pastedFileStore = null;
 // 降级路线共用：发不出去的时候把话留在剪贴板里，别让用户白打一遍。
 function copyPromptToClipboard(text) {
   try {
@@ -1118,6 +1120,10 @@ function copyPromptToClipboard(text) {
 (function initQuickSendLayer() {
   const { createTerminalAppSender } = require("./terminal-app-send");
   const { createSessionPromptSend } = require("./session-prompt-send");
+  const { createPastedFileStore } = require("./pasted-file-store");
+  // 面板里粘贴的图片落在这里；app.getPath("temp") 是系统给的临时目录，
+  // 系统自己会清理，我们不去动它。
+  pastedFileStore = createPastedFileStore({ dir: path.join(app.getPath("temp"), "clawd-pastes") });
   terminalAppSender = createTerminalAppSender({ log: (msg) => sessionLog(msg) });
   sessionPromptSend = createSessionPromptSend({
     getTargetSession: () => resolveQuickTarget(),
@@ -5545,6 +5551,33 @@ async function quickPickNewSessionFolder() {
   return { status: "ok", folder: picked };
 }
 
+// 面板上的「📎 添加文件」：弹系统选文件框（可多选），把绝对路径交回渲染端
+// 填进输入框。面板只往终端里送文字，所以这里给的是路径——Claude 自己会去读。
+async function quickPickFiles() {
+  // 和选目录一样：对话框弹出时指针必然离开卡片，先把面板钉住。
+  quickSetHold("dialog", true);
+  let result = null;
+  try {
+    result = await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"] });
+  } catch (err) {
+    console.warn("Clawd: 选文件失败:", err && err.message);
+    return { status: "error", message: err && err.message };
+  } finally {
+    quickSetHold("dialog", false);
+  }
+  const paths = result && !result.canceled && Array.isArray(result.filePaths) ? result.filePaths : [];
+  if (!paths.length) return { status: "canceled" };
+  return { status: "ok", paths };
+}
+
+// 面板里粘贴进来的图片/文件：落成临时文件，把路径交回渲染端。
+async function quickSavePastedFile(payload) {
+  if (!pastedFileStore) return { status: "error", message: "pasted file store unavailable" };
+  const result = pastedFileStore.save(payload);
+  if (result.status === "ok") sessionLog(`Clawd: 粘贴的文件已存到 ${result.path}`);
+  return result;
+}
+
 // 渲染端上报指针进出卡片：卡片外的透明区让点击穿透（主进程轮询另有兜底）。
 // 会话列表展开/收起（点状态行）。
 function quickSetListOpen(open) {
@@ -5565,6 +5598,14 @@ function quickSetClickThrough(through) {
 function quickSetHold(reason, held) {
   if (_sessionHud && typeof _sessionHud.setHold === "function") {
     _sessionHud.setHold(reason, held);
+  }
+}
+
+// 面板上报「输入框上挂了几个附件」：附件本身在渲染端，主进程只用这个数字
+// 决定卡片要不要多出一行标签（窗口高度）以及面板要不要因此不自动收起。
+function quickSetAttachments(count) {
+  if (_sessionHud && typeof _sessionHud.setAttachments === "function") {
+    _sessionHud.setAttachments(count);
   }
 }
 
@@ -5619,9 +5660,12 @@ registerSessionIpc({
   quickCreateSession,
   quickCancelPendingSession,
   quickPickFolder: quickPickNewSessionFolder,
+  quickPickFiles,
+  quickSavePastedFile,
   quickSetNewSessionOption,
   quickSetListOpen,
   quickSetHold,
+  quickSetAttachments,
   quickSetClickThrough,
   quickMode: _dashboard.quick,
   getKimiQuotaStatus: () => _kimiQuotaRuntime.getStatus(),

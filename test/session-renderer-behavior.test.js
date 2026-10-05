@@ -236,6 +236,11 @@ function hudTranslations(overrides = {}) {
     hudPickFolderFailed: "Could not open the folder picker",
     hudQuickPermissionLabel: "Permissions",
     hudQuickEffortLabel: "Effort",
+    hudQuickAttachFile: "Add a file…",
+    hudQuickAttachRemove: "Remove this file",
+    hudQuickAttachLimit: "At most {n} files",
+    hudQuickAttachFailed: "Could not open the file picker",
+    hudQuickPastedFileFailed: "Could not save the pasted file",
     hudNewSessionQueued: "Queued — the terminal opens with your first message",
     hudNewSessionStarted: "New session opened in the terminal, message sent",
     hudNewSessionStarting: "The new session is still starting",
@@ -277,6 +282,11 @@ const HUD_ZH_TRANSLATIONS = hudTranslations({
   hudPickFolderFailed: "没能打开文件夹选择框",
   hudQuickPermissionLabel: "权限",
   hudQuickEffortLabel: "强度",
+  hudQuickAttachFile: "添加文件…",
+  hudQuickAttachRemove: "移除这个附件",
+  hudQuickAttachLimit: "最多挂 {n} 个文件",
+  hudQuickAttachFailed: "没能打开文件选择框",
+  hudQuickPastedFileFailed: "没能保存粘贴的文件",
   hudNewSessionQueued: "已排好，发消息时会在终端里打开",
   hudNewSessionStarted: "新会话已在终端里开好，消息已送出",
   hudNewSessionStarting: "新会话正在启动，稍等一下再发",
@@ -413,6 +423,9 @@ async function loadHud(options = {}) {
     pickFolder: 0,
     setNewSessionOption: [],
     cancelPendingSession: 0,
+    setAttachments: [],
+    pickFiles: 0,
+    savePastedFile: [],
   };
   const warnings = [];
   const timers = new Map();
@@ -438,6 +451,7 @@ async function loadHud(options = {}) {
       if (options.setClickThroughThrows) throw new Error("set click through failed");
     },
     setHold: (reason, held) => { calls.setHold.push([reason, held]); },
+    setAttachments: (count) => { calls.setAttachments.push(count); },
     selectSession: async (sessionId) => {
       calls.selectSession.push(sessionId);
       return options.selectSessionResult || { status: "ok" };
@@ -455,6 +469,16 @@ async function loadHud(options = {}) {
       if (options.pickFolderThrows) throw new Error("pick folder failed");
       return options.pickFolderResult || { status: "ok" };
     },
+    pickFiles: async () => {
+      calls.pickFiles += 1;
+      if (options.pickFilesThrows) throw new Error("pick files failed");
+      return options.pickFilesResult || { status: "ok", paths: ["/tmp/一张图.png"] };
+    },
+    savePastedFile: async (payload) => {
+      calls.savePastedFile.push(payload);
+      return options.savePastedResult || { status: "ok", path: "/tmp/clawd-pastes/paste-1.png" };
+    },
+    pathForFile: (file) => (options.pathForFile ? options.pathForFile(file) : ""),
     cancelPendingSession: async () => {
       calls.cancelPendingSession += 1;
       return options.cancelPendingResult || { status: "ok" };
@@ -490,10 +514,17 @@ async function loadHud(options = {}) {
 
   const root = document.elements.get("hud");
   const find = (className) => byClass(root, className);
+  // 面板一加载就会主动报一次附件数与 hold（窗口重建后别留着上次的数字）。
+  // 这几笔单独记下来给专门的用例断言，其余用例从干净的账本开始数。
+  const startupCalls = {
+    setAttachments: calls.setAttachments.splice(0),
+    setHold: calls.setHold.splice(0),
+  };
   return {
     document,
     root,
     calls,
+    startupCalls,
     warnings,
     find,
     one: (className) => find(className)[0] || null,
@@ -1375,6 +1406,277 @@ test("quick panel: Esc 只收会话列表", async () => {
   hud.pushQuickState({ listOpen: true, canCreateSession: true, sessions: [] });
   await hud.document.dispatch("keydown", { key: "Escape" });
   assert.deepStrictEqual(hud.calls.setListOpen, [false]);
+});
+
+// ── 加文件：📎 选文件 / ⌘V 粘贴 ──
+
+test("quick panel: 一加载就把附件数报成 0，免得主进程留着上次的数字", async () => {
+  const hud = await loadHud();
+  // 数字对不上会让卡片一直偏高，而且面板再也不自动收起（主进程拿它当「别收」的理由）
+  assert.deepStrictEqual(hud.startupCalls.setAttachments, [0]);
+  assert.deepStrictEqual(hud.startupCalls.setHold, [["draft", false]]);
+});
+
+test("quick panel: 点 📎 → 文件变成标签，输入框干干净净", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    pickFilesResult: { status: "ok", paths: ["/tmp/一张图.png", "/tmp/my score.pdf"] },
+  });
+  const input = hud.one("quick-input");
+  input.value = "看看这个";
+
+  await hud.one("quick-attach-btn").dispatch("click");
+  await flush();
+
+  assert.strictEqual(hud.calls.pickFiles, 1);
+  assert.strictEqual(input.value, "看看这个", "路径不许再塞进输入框");
+  const chips = hud.find("quick-attach-chip");
+  assert.strictEqual(chips.length, 2);
+  assert.deepStrictEqual(
+    hud.find("quick-attach-name").map((el) => el.textContent),
+    ["一张图.png", "my score.pdf"],
+    "标签上只显示文件名"
+  );
+  assert.strictEqual(chips[1].title, "/tmp/my score.pdf", "完整路径留作悬停提示");
+  assert.deepStrictEqual(hud.calls.setAttachments, [2], "要把数量报给主进程（卡片高度）");
+  assert.ok(hud.document.body.classList.contains("has-attachments"));
+  assert.deepStrictEqual(hud.calls.setHold.at(-1), ["draft", true], "还挂着东西，面板别收");
+});
+
+test("quick panel: 取消选文件什么都不做，失败才提示", async () => {
+  const canceled = await loadHud({ pickFilesResult: { status: "canceled" } });
+  canceled.one("quick-input").value = "";
+  await canceled.one("quick-attach-btn").dispatch("click");
+  await flush();
+  assert.strictEqual(canceled.find("quick-attach-chip").length, 0);
+  assert.ok(!canceled.one("quick-status-text").classList.contains("is-error"), "取消不是错误");
+
+  const failed = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    pickFilesResult: { status: "error" },
+  });
+  await failed.one("quick-attach-btn").dispatch("click");
+  await flush();
+  assert.strictEqual(failed.one("quick-status-text").textContent, "没能打开文件选择框");
+
+  const threw = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    pickFilesThrows: true,
+  });
+  await threw.one("quick-attach-btn").dispatch("click");
+  await flush();
+  assert.strictEqual(threw.one("quick-status-text").textContent, "没能打开文件选择框");
+});
+
+// 造一个跟浏览器里形状一致的粘贴事件（总是夹一个纯文字项：它不该被当成文件）
+function pasteEvent(files) {
+  // 假 DOM 的 dispatch 会把事件复制一份再交给监听器，所以标记写在闭包里的
+  // 共享状态上，测试读的也是它。
+  const state = { prevented: false };
+  const event = {
+    state,
+    clipboardData: {
+      items: files.map((file) => ({
+        kind: "file",
+        getAsFile: () => file,
+      })).concat([{ kind: "string", getAsFile: () => null }]),
+    },
+  };
+  event.preventDefault = () => { state.prevented = true; };
+  return event;
+}
+
+function fakeFile(name, type, bytes) {
+  return {
+    name,
+    type,
+    arrayBuffer: async () => new Uint8Array(bytes).buffer,
+  };
+}
+
+test("quick panel: 粘贴截图 → 存成临时文件，变成标签", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  const input = hud.one("quick-input");
+  const event = pasteEvent([fakeFile("图片.png", "image/png", [1, 2, 3])]);
+
+  await input.dispatch("paste", event);
+  await flush();
+
+  assert.ok(event.state.prevented, "处理了文件就该拦掉浏览器默认行为");
+  assert.strictEqual(hud.calls.savePastedFile.length, 1);
+  assert.strictEqual(hud.calls.savePastedFile[0].type, "image/png");
+  assert.strictEqual(hud.calls.savePastedFile[0].data.byteLength, 3);
+  assert.strictEqual(input.value, "", "输入框里不留路径");
+  assert.deepStrictEqual(
+    hud.find("quick-attach-name").map((el) => el.textContent),
+    ["paste-1.png"]
+  );
+});
+
+test("quick panel: 剪贴板里是从 Finder 拷的文件 → 直接用它的真实路径，不复制一份", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    pathForFile: () => "/Users/nathuris/Desktop/我的 谱子.pdf",
+  });
+  const input = hud.one("quick-input");
+  await input.dispatch("paste", pasteEvent([fakeFile("我的 谱子.pdf", "application/pdf", [1])]));
+  await flush();
+
+  assert.strictEqual(hud.calls.savePastedFile.length, 0, "有路径就不用落临时文件");
+  assert.strictEqual(hud.find("quick-attach-chip")[0].title, "/Users/nathuris/Desktop/我的 谱子.pdf");
+  assert.strictEqual(input.value, "");
+});
+
+test("quick panel: 粘贴纯文字不动它，交给浏览器自己插进输入框", async () => {
+  const hud = await loadHud();
+  const input = hud.one("quick-input");
+  const event = pasteEvent([]);
+  await input.dispatch("paste", event);
+  await flush();
+  assert.strictEqual(event.state.prevented, false);
+  assert.strictEqual(hud.calls.savePastedFile.length, 0);
+});
+
+test("quick panel: 粘贴的文件存不下来时如实提示，也不留下半个附件", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    savePastedResult: { status: "error" },
+  });
+  const input = hud.one("quick-input");
+  await input.dispatch("paste", pasteEvent([fakeFile("图片.png", "image/png", [1])]));
+  await flush();
+  assert.strictEqual(hud.one("quick-status-text").textContent, "没能保存粘贴的文件");
+  assert.ok(hud.one("quick-status-text").classList.contains("is-error"));
+  assert.strictEqual(hud.find("quick-attach-chip").length, 0);
+});
+
+// ── 附件：删除 / 发送拼装 ──
+
+test("quick panel: 点标签上的 ✕ 只删那一个，并把焦点交回输入框", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    pickFilesResult: { status: "ok", paths: ["/tmp/a.png", "/tmp/b.png"] },
+  });
+  await hud.one("quick-attach-btn").dispatch("click");
+  await flush();
+  assert.strictEqual(hud.find("quick-attach-chip").length, 2);
+
+  const removeBtn = byClass(hud.find("quick-attach-chip")[0], "quick-attach-remove")[0];
+  assert.strictEqual(removeBtn.getAttribute("aria-label"), "移除这个附件");
+  await removeBtn.dispatch("click");
+  await flush();
+
+  const left = hud.find("quick-attach-chip");
+  assert.strictEqual(left.length, 1);
+  assert.strictEqual(left[0].title, "/tmp/b.png", "删掉的正好是点的那个");
+  assert.deepStrictEqual(hud.calls.setAttachments, [2, 1], "删完要把新数量报上去");
+
+  // 全删光：标签行不占位置、body 摘掉 has-attachments
+  await byClass(left[0], "quick-attach-remove")[0].dispatch("click");
+  await flush();
+  assert.strictEqual(hud.find("quick-attach-chip").length, 0);
+  assert.ok(hud.one("quick-attach-row").classList.contains("is-empty"));
+  assert.ok(!hud.document.body.classList.contains("has-attachments"));
+  assert.deepStrictEqual(hud.calls.setAttachments, [2, 1, 0]);
+});
+
+test("quick panel: 发送时把字和路径拼成一条（含空格的加引号）", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    pickFilesResult: { status: "ok", paths: ["/tmp/a.png", "/tmp/my b.pdf"] },
+  });
+  await hud.one("quick-attach-btn").dispatch("click");
+  await flush();
+  hud.one("quick-input").value = "看看这个";
+
+  await hud.one("quick-input").dispatch("keydown", { key: "Enter" });
+  await flush();
+
+  assert.deepStrictEqual(hud.calls.sendPrompt, [
+    '看看这个 /tmp/a.png "/tmp/my b.pdf"',
+  ]);
+  assert.strictEqual(hud.one("quick-input").value, "", "发成功要清空输入框");
+  assert.strictEqual(hud.find("quick-attach-chip").length, 0, "发成功要清空附件");
+  assert.deepStrictEqual(hud.calls.setAttachments.at(-1), 0);
+  assert.strictEqual(hud.one("quick-status-text").textContent, "已发送到终端");
+});
+
+test("quick panel: 只挂附件不写字也能发", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    pickFilesResult: { status: "ok", paths: ["/tmp/a.png"] },
+  });
+  await hud.one("quick-attach-btn").dispatch("click");
+  await flush();
+
+  await hud.one("quick-input").dispatch("keydown", { key: "Enter" });
+  await flush();
+
+  assert.deepStrictEqual(hud.calls.sendPrompt, ["/tmp/a.png"], "空草稿 + 有附件 = 照发");
+});
+
+test("quick panel: 没真送进去（只复制/出错）时，字和附件都留着", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    pickFilesResult: { status: "ok", paths: ["/tmp/a.png"] },
+    sendPromptResult: { status: "copied", textKey: "hudSendCopied" },
+  });
+  await hud.one("quick-attach-btn").dispatch("click");
+  await flush();
+  hud.one("quick-input").value = "这些话";
+
+  await hud.one("quick-input").dispatch("keydown", { key: "Enter" });
+  await flush();
+
+  assert.strictEqual(hud.one("quick-input").value, "这些话", "没发出去就别清空");
+  assert.strictEqual(hud.find("quick-attach-chip").length, 1, "附件也留着");
+});
+
+test("quick panel: 没字也没附件时回车什么都不发", async () => {
+  const hud = await loadHud();
+  await hud.one("quick-input").dispatch("keydown", { key: "Enter" });
+  await flush();
+  assert.deepStrictEqual(hud.calls.sendPrompt, []);
+});
+
+test("quick panel: 附件最多 4 个，多出来的给提示", async () => {
+  const hud = await loadHud({
+    i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS },
+    pickFilesResult: { status: "ok", paths: ["/tmp/a", "/tmp/b", "/tmp/c", "/tmp/d", "/tmp/e"] },
+  });
+  await hud.one("quick-attach-btn").dispatch("click");
+  await flush();
+
+  assert.strictEqual(hud.find("quick-attach-chip").length, 4, "上限 4");
+  assert.strictEqual(hud.one("quick-status-text").textContent, "最多挂 4 个文件");
+});
+
+test("quick panel: 同一个文件挂两遍只算一个", async () => {
+  const hud = await loadHud({
+    pickFilesResult: { status: "ok", paths: ["/tmp/a.png"] },
+  });
+  await hud.one("quick-attach-btn").dispatch("click");
+  await flush();
+  await hud.one("quick-attach-btn").dispatch("click");
+  await flush();
+  assert.strictEqual(hud.find("quick-attach-chip").length, 1);
+});
+
+test("quick panel: 切语言不重建输入框，标签的 ✕ 提示语跟着换", async () => {
+  const hud = await loadHud();
+  await hud.one("quick-attach-btn").dispatch("click");
+  await flush();
+  const input = hud.one("quick-input");
+  const chipCount = hud.find("quick-attach-chip").length;
+
+  hud.pushLang({ lang: "zh", translations: HUD_ZH_TRANSLATIONS });
+
+  assert.strictEqual(hud.one("quick-input"), input, "输入框节点要复用");
+  assert.strictEqual(hud.find("quick-attach-chip").length, chipCount);
+  assert.strictEqual(
+    byClass(hud.find("quick-attach-chip")[0], "quick-attach-remove")[0].getAttribute("aria-label"),
+    "移除这个附件"
+  );
 });
 
 test("click through: 只有内外切换时才上报", async () => {

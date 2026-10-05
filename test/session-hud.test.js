@@ -14,6 +14,9 @@ const sessionHud = require("../src/session-hud");
 const {
   QUICK_CARD,
   QUICK_CARD_EXPANDED,
+  QUICK_ATTACH_ROW,
+  QUICK_ATTACH_EXTRA,
+  quickCardHeight,
   QUICK_SHELL,
   computeBlockBounds,
   evaluateBaseEligible,
@@ -257,9 +260,22 @@ describe("卡片几何（只剩状态行 + 输入行）", () => {
     assert.doesNotMatch(src, /quick-menu|quick-mode-option|quick-effort/);
     assert.doesNotMatch(src, /setMenuOpen|isMenuOpen/);
     // 列表展开：卡片变高 + 钉住 hold，收起时复位
-    assert.match(src, /cardH: sessionListOpen \? QUICK_CARD_EXPANDED\.height : QUICK_CARD\.height/);
+    assert.match(src, /cardH: quickCardHeight\(sessionListOpen, attachmentCount > 0\)/);
     assert.match(src, /if \(next\) holdReasons\.add\("menu"\);/);
     assert.match(src, /function setSessionListOpen\(open\)/);
+  });
+
+  it("卡片高度：展开与附件两种加法可以叠加", () => {
+    // 收起 66；展开 +254（列表区 250 + 一个行距 4）；附件再 +28（标签行 24 + 一个行距 4）
+    assert.strictEqual(QUICK_ATTACH_ROW.height, 24);
+    assert.strictEqual(QUICK_ATTACH_EXTRA, 24 + 4);
+    assert.strictEqual(quickCardHeight(false, false), QUICK_CARD.height);
+    assert.strictEqual(quickCardHeight(true, false), QUICK_CARD_EXPANDED.height);
+    assert.strictEqual(quickCardHeight(false, true), QUICK_CARD.height + QUICK_ATTACH_EXTRA);
+    assert.strictEqual(
+      quickCardHeight(true, true),
+      QUICK_CARD_EXPANDED.height + QUICK_ATTACH_EXTRA
+    );
   });
 
   it("展开会话列表时卡片变高，且只往上长（底边钉住）", () => {
@@ -447,7 +463,7 @@ describe("快捷面板源码级契约", () => {
   });
 
   it("hold keeps the panel alive regardless of cursor read failures", () => {
-    assert.match(src, /let inHotZone = holdReasons\.size > 0;/);
+    assert.match(src, /let inHotZone = holdReasons\.size > 0 \|\| attachmentCount > 0;/);
   });
 
   it("window closed handlers clear stale holds", () => {

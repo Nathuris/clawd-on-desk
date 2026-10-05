@@ -359,6 +359,28 @@ describe("面板窗口尺寸：主进程常量与 CSS 一致", () => {
     assert.strictEqual(hudTest.QUICK_CARD.height + 250 + 4, hudTest.QUICK_CARD_EXPANDED.height);
   });
 
+  it("挂了附件时多出来的一行，两侧数字也一致", () => {
+    // 标签行 24 + 卡片自己的一个行距 4 = 28；收起 66+28=94，展开 320+28=348
+    assert.strictEqual(hudTest.QUICK_ATTACH_ROW.height, 24);
+    assert.strictEqual(hudTest.QUICK_ATTACH_EXTRA, 24 + 4);
+    assert.match(sessionHudHtml, /\.quick-attach-row \{[\s\S]*?height:\s*24px;[\s\S]*?\}/);
+    assert.match(sessionHudHtml, /body\.has-attachments \.quick-card \{ height: 94px; \}/);
+    assert.match(
+      sessionHudHtml,
+      /body\.session-list-open\.has-attachments \.quick-card \{ height: 348px; \}/
+    );
+    // 顺序要紧：带 attach 的两条必须排在前面两条之后，同特异性时后者胜
+    const plain = sessionHudHtml.indexOf(".quick-card { height: 66px; }");
+    const opened = sessionHudHtml.indexOf("body.session-list-open .quick-card { height: 320px; }");
+    const attached = sessionHudHtml.indexOf("body.has-attachments .quick-card { height: 94px; }");
+    const both = sessionHudHtml.indexOf(
+      "body.session-list-open.has-attachments .quick-card { height: 348px; }"
+    );
+    assert.ok(plain < attached && opened < attached && attached < both, "CSS 覆盖顺序不对");
+    assert.strictEqual(hudTest.QUICK_CARD.height + hudTest.QUICK_ATTACH_EXTRA, 94);
+    assert.strictEqual(hudTest.QUICK_CARD_EXPANDED.height + hudTest.QUICK_ATTACH_EXTRA, 348);
+  });
+
   it("卡片下方 30px 壳内不放任何节点（输入法净空）", () => {
     // 净空靠 body padding，不在卡片里；渲染端不应往卡片下方塞节点。
     const cardClose = sessionHudHtml.indexOf("</style>");
