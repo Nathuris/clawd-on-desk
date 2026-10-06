@@ -263,6 +263,15 @@ function hudTranslations(overrides = {}) {
     hudQuickEffortHigh: "High",
     hudQuickEffortXHigh: "XHigh",
     hudQuickEffortMax: "Max",
+    hudQuickLiveSessionLabel: "In terminal",
+    hudQuickLivePendingLabel: "New session",
+    hudQuickLiveUnknown: "unknown",
+    hudQuickLiveHint: "Press Shift+Tab in the terminal to change the mode",
+    hudQuickModeDontAsk: "No asking",
+    hudQuickModeBypass: "Skip prompts",
+    hudControlEffortSent: "Sent — the session's effort is changed",
+    hudControlEffortFailed: "Could not change it — type /effort in the terminal",
+    hudControlEffortUnsupported: "This session does not take panel effort changes",
     hudQuickOptionFailed: "Could not switch that setting",
     hudNewSessionOpened: "Opened a new session in the terminal",
     hudNewSessionFailed: "Could not open a new session",
@@ -314,6 +323,15 @@ const HUD_ZH_TRANSLATIONS = hudTranslations({
   hudQuickEffortHigh: "高",
   hudQuickEffortXHigh: "极高",
   hudQuickEffortMax: "最大",
+  hudQuickLiveSessionLabel: "终端里",
+  hudQuickLivePendingLabel: "新会话",
+  hudQuickLiveUnknown: "未知",
+  hudQuickLiveHint: "运行中的会话要换权限模式，得在终端里按 Shift+Tab",
+  hudQuickModeDontAsk: "不用问",
+  hudQuickModeBypass: "跳过确认",
+  hudControlEffortSent: "已发送：终端里那个会话的强度已改",
+  hudControlEffortFailed: "没能改：请到终端里自己敲 /effort",
+  hudControlEffortUnsupported: "这个会话不支持面板改强度",
   hudQuickOptionFailed: "切换失败",
   hudNewSessionOpened: "已在终端里新建会话",
   hudNewSessionFailed: "新建会话失败",
@@ -432,6 +450,7 @@ async function loadHud(options = {}) {
     newSession: 0,
     pickFolder: 0,
     setNewSessionOption: [],
+    applyEffort: [],
     cancelPendingSession: 0,
     setAttachments: [],
     pickFiles: 0,
@@ -498,6 +517,12 @@ async function loadHud(options = {}) {
       if (options.setOptionThrows) throw new Error("set option failed");
       return options.setOptionResult || { status: "ok" };
     },
+    applyEffort: async (level) => {
+      calls.applyEffort.push(level);
+      if (options.applyEffortThrows) throw new Error("apply effort failed");
+      // 用例可以中途改这个值，模拟"够不着 / 送不进去 / 当前目标不是会话"
+      return api.applyEffortResult || { status: "sent" };
+    },
   };
 
   const context = vm.createContext({
@@ -536,6 +561,8 @@ async function loadHud(options = {}) {
     calls,
     startupCalls,
     warnings,
+    // 假 API 本体：用例可以改它上面的字段来模拟"主进程这次返回什么"
+    api,
     find,
     one: (className) => find(className)[0] || null,
     byTag: (tagName) => descendants(root).filter((el) => el.tagName === String(tagName).toUpperCase()),
@@ -1135,6 +1162,51 @@ test("quick panel: 点状态行开合会话列表", async () => {
   assert.strictEqual(hud.find("quick-session-item").length, 1, "展开后才建列表行");
 });
 
+test("quick panel: 设置菜单顶部那行显示终端里真实的模式与强度", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  const settings = (extra) => hud.pushQuickState({
+    canSend: true, targetTitle: "x", menuOpen: "settings", ...extra,
+  });
+
+  // 目标是运行中的会话：读会话自己上报的值（终端里的真值）
+  settings({ targetId: "s1", targetPermissionMode: "plan", targetEffort: "xhigh" });
+  const row = hud.one("quick-live-row");
+  assert.ok(row, "设置菜单顶部要有这行只读状态");
+  assert.strictEqual(byClass(row, "quick-live-label")[0].textContent, "终端里");
+  assert.strictEqual(byClass(row, "quick-live-value")[0].textContent, "计划 · 极高");
+
+  // 面板自己那 4 档之外的也要如实显示
+  settings({ targetId: "s1", targetPermissionMode: "dontAsk", targetEffort: "low" });
+  assert.strictEqual(byClass(row, "quick-live-value")[0].textContent, "不用问 · 低");
+  settings({ targetId: "s1", targetPermissionMode: "bypassPermissions", targetEffort: "max" });
+  assert.strictEqual(byClass(row, "quick-live-value")[0].textContent, "跳过确认 · 最大");
+  // 内部的 default 就是命令行写作 manual 的那档 -> 显示「手动」
+  settings({ targetId: "s1", targetPermissionMode: "default", targetEffort: "high" });
+  assert.strictEqual(byClass(row, "quick-live-value")[0].textContent, "手动 · 高");
+
+  // 会话还没上报过：显示「未知」，绝不拿"新会话档位"顶上
+  settings({
+    targetId: "s1", targetPermissionMode: null, targetEffort: null,
+    permissionMode: "plan", effort: "max",
+  });
+  assert.strictEqual(byClass(row, "quick-live-value")[0].textContent, "未知 · 未知");
+
+  // 目标是排队中的新会话：它还没跑起来，显示的是新会话档位
+  hud.pushQuickState({
+    canSend: true, menuOpen: "settings", pendingId: "p1", targetPending: true,
+    permissionMode: "acceptEdits", effort: "medium",
+  });
+  const pendingRow = hud.one("quick-live-row");
+  assert.strictEqual(byClass(pendingRow, "quick-live-label")[0].textContent, "新会话");
+  assert.strictEqual(byClass(pendingRow, "quick-live-value")[0].textContent, "自动编辑 · 中");
+
+  // 会话在终端里换了模式 -> 面板这行跟着变（开关着菜单时也不重建节点）
+  const before = hud.one("quick-live-value");
+  settings({ targetId: "s1", targetPermissionMode: "acceptEdits", targetEffort: "low" });
+  assert.strictEqual(hud.one("quick-live-value"), before, "还是同一个节点，只改文字");
+  assert.strictEqual(before.textContent, "自动编辑 · 低");
+});
+
 test("quick panel: 点齿轮开设置菜单，两个菜单互斥", async () => {
   const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
   withTarget(hud);
@@ -1351,6 +1423,54 @@ test("quick panel: 点权限列表项 / 拖强度滑块 → 把键和值交给�
   await slider.dispatch("input");
   await flush();
   assert.deepStrictEqual(hud.calls.setNewSessionOption[1], ["effort", "max"]);
+});
+
+test("quick panel: 滑块松手才把强度应用到当前会话，结果是失败就如实说", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    menuOpen: "settings", canCreateSession: true, sessions: [],
+    targetId: "s1", permissionMode: "auto", effort: "low",
+  });
+  const slider = hud.one("quick-effort-slider");
+
+  // 拖动过程中（input）只更新默认档位，不发控制命令——否则每动一格发一条
+  slider.value = "4";
+  await slider.dispatch("input");
+  await flush();
+  assert.deepStrictEqual(hud.calls.setNewSessionOption, [["effort", "max"]]);
+  assert.deepStrictEqual(hud.calls.applyEffort, [], "拖动过程中不许发控制命令");
+
+  // 松手（change）才应用
+  hud.api.applyEffortResult = { status: "sent" };
+  await slider.dispatch("change");
+  await flush();
+  assert.deepStrictEqual(hud.calls.applyEffort, ["max"]);
+  assert.strictEqual(hud.one("quick-status-text").textContent, "已发送：终端里那个会话的强度已改");
+});
+
+test("quick panel: 够不着的会话 / 送不进去，面板分别说清楚", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({ menuOpen: "settings", canCreateSession: true, sessions: [], targetId: "s1", effort: "low" });
+  const slider = hud.one("quick-effort-slider");
+  slider.value = "1";
+
+  hud.api.applyEffortResult = { status: "unsupported", reason: "not-claude" };
+  await slider.dispatch("change");
+  await flush();
+  assert.match(hud.one("quick-status-text").textContent, /不支持面板改强度/);
+
+  hud.api.applyEffortResult = { status: "failed", reason: "not-busy" };
+  await slider.dispatch("change");
+  await flush();
+  assert.match(hud.one("quick-status-text").textContent, /没能改/);
+
+  // 目标是排队中的新会话 / 没有会话：只当默认档位，不弹提示（面板那行
+  // 「新会话：…」已经说明白了）。先把上一条提示放掉，免得看到的是残留。
+  hud.fireTimers();
+  hud.api.applyEffortResult = { status: "skipped", reason: "no-session" };
+  await slider.dispatch("change");
+  await flush();
+  assert.doesNotMatch(hud.one("quick-status-text").textContent, /没能改|不支持/);
 });
 
 test("quick panel: 拖滑块时状态推回来也不重建节点（否则拖一下就断）", async () => {

@@ -101,7 +101,7 @@ body.has-attachments .quick-card { height: 94px; }
    点状态行 → 会话菜单；点齿轮 → 设置菜单。它是**另一张卡片**：主卡片高度一点
    不变，菜单卡片在主卡片上方淡入（不再是把整张卡片拉高）。
    卡片本体的高度 = 内容 + 上下内边距 12 + 边框 2：
-     会话 178 + 14 = 192；设置 228 + 14 = 242。
+     会话 178 + 14 = 192；设置 248 + 14 = 262。
    窗口整体高度 = 主卡片 + 6px 间距 + 菜单卡片，由主进程按同一组数字算。 */
 .quick-menu-card {
   display: none;
@@ -122,7 +122,7 @@ body.has-attachments .quick-card { height: 94px; }
 body.session-menu-open .quick-menu-card,
 body.settings-menu-open .quick-menu-card { display: flex; }
 body.session-menu-open .quick-menu-card { height: 192px; }
-body.settings-menu-open .quick-menu-card { height: 242px; }
+body.settings-menu-open .quick-menu-card { height: 262px; }
 
 /* 淡入：从透明 + 稍微靠下一点浮上来（@starting-style 是首帧样式，Chromium 支持） */
 @starting-style {
@@ -229,8 +229,33 @@ body.session-menu-open .quick-target-caret { transform: rotate(180deg); }
 }
 /* 会话菜单：最多 4 条会话（4×28）+ 新建（28）+ 选文件夹（28）+ 行距 5×2 = 178 */
 body.session-menu-open .quick-session-list { height: 178px; }
-/* 设置菜单：4 个权限项（4×44）+ 强度块（44）+ 行距 4×2 = 228 */
-body.settings-menu-open .quick-session-list { height: 228px; }
+/* 设置菜单：只读状态行（18）+ 4 个权限项（4×44）+ 强度块（44）+ 行距 5×2 = 248 */
+body.settings-menu-open .quick-session-list { height: 248px; }
+
+/* ===== 只读状态行：「终端里：计划 · 高」 =====
+   读的是会话自己上报的真值（hook 带回来的 permission_mode / effort）。面板不
+   代劳改权限模式，这一行只负责让你看清终端里现在到底是什么，免得两边各说各话。 */
+.quick-live-row {
+  flex: 0 0 18px;
+  height: 18px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1;
+}
+.quick-live-label { flex: 0 0 auto; }
+.quick-live-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
 
 .quick-session-item {
   flex: 0 0 28px;

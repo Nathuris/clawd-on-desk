@@ -80,6 +80,7 @@ const HOOK_FILES = [
   "context-usage.js",
   "antigravity-context-usage.js",
   "claude-rate-limits.js",
+  "session-mode-fields.js",
   "claude-statusline.js",
   "claude-statusline-local-chain.js",
   "codex-rate-limits.js",

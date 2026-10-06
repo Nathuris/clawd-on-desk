@@ -398,6 +398,9 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
     headless: !!(session && session.headless),
     platform: (session && session.platform) || null,
     model: (session && session.model) || null,
+    // 会话当前的权限模式与思考强度（面板显示"终端里现在是什么"用）。
+    permissionMode: (session && session.permissionMode) || null,
+    effort: (session && session.effort) || null,
     provider: (session && session.provider) || null,
     codexOriginator: (session && session.codexOriginator) || null,
     codexSource: (session && session.codexSource) || null,
@@ -637,6 +640,9 @@ function sessionSnapshotSignature(snapshot) {
       wslDistro: entry.wslDistro,
       platform: entry.platform,
       model: entry.model,
+      // 模式/强度变了也要让签名变，否则面板收不到新快照、显示不会跟着更新
+      permissionMode: entry.permissionMode,
+      effort: entry.effort,
       provider: entry.provider,
       codexOriginator: entry.codexOriginator,
       codexSource: entry.codexSource,

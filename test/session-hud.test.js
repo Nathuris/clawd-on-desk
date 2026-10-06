@@ -380,7 +380,7 @@ describe("卡片几何（只剩状态行 + 输入行）", () => {
     assert.strictEqual(QUICK_ATTACH_ROW.height, 24);
     assert.strictEqual(QUICK_ATTACH_EXTRA, 24 + 4);
     assert.strictEqual(QUICK_MENU_CARD.session, 178 + 6 + 6 + 2);
-    assert.strictEqual(QUICK_MENU_CARD.settings, 228 + 6 + 6 + 2);
+    assert.strictEqual(QUICK_MENU_CARD.settings, 248 + 6 + 6 + 2);
     assert.strictEqual(QUICK_MENU_GAP, 6);
 
     assert.strictEqual(quickCardHeight(null, false), QUICK_CARD.height);
@@ -423,8 +423,8 @@ describe("卡片几何（只剩状态行 + 输入行）", () => {
     );
     assert.strictEqual(
       quickCardHeight("settings", false) - QUICK_CARD.height,
-      6 + 242,
-      "设置菜单卡片 242（列表区 228 + 内边距 12 + 边框 2）＋ 6px 间距"
+      6 + 262,
+      "设置菜单卡片 262（列表区 248 + 内边距 12 + 边框 2）＋ 6px 间距"
     );
   });
 

@@ -149,6 +149,8 @@ function update(api, o = {}) {
       claudeQuota: o.claudeQuota ?? null,
       platform: o.platform ?? null,
       model: o.model ?? null,
+      permissionMode: o.permissionMode ?? null,
+      effort: o.effort ?? null,
       provider: o.provider ?? null,
       codexOriginator: o.codexOriginator ?? null,
       codexSource: o.codexSource ?? null,
@@ -1765,6 +1767,26 @@ describe("updateSession()", () => {
     update(api, { id: "sticky1", state: "working", model: "claude-opus-5" });
     update(api, { id: "sticky1", state: "working", event: "PostToolUse" });
     assert.strictEqual(api.sessions.get("sticky1").model, "claude-opus-5");
+  });
+
+  it("权限模式与强度同样粘性合并（面板要一直显示「终端里现在是什么」）", () => {
+    update(api, {
+      id: "sticky-mode",
+      state: "working",
+      permissionMode: "plan",
+      effort: "high",
+    });
+    // 后面的事件大多只带其中一个（甚至都不带），旧值不能被清掉
+    update(api, { id: "sticky-mode", state: "working", event: "UserPromptSubmit", permissionMode: "acceptEdits" });
+    assert.strictEqual(api.sessions.get("sticky-mode").permissionMode, "acceptEdits");
+    assert.strictEqual(api.sessions.get("sticky-mode").effort, "high");
+    update(api, { id: "sticky-mode", state: "working", event: "PreToolUse" });
+    assert.strictEqual(api.sessions.get("sticky-mode").permissionMode, "acceptEdits");
+    assert.strictEqual(api.sessions.get("sticky-mode").effort, "high");
+    // 从没上报过就是 null，不猜
+    update(api, { id: "sticky-none", state: "idle" });
+    assert.strictEqual(api.sessions.get("sticky-none").permissionMode, null);
+    assert.strictEqual(api.sessions.get("sticky-none").effort, null);
   });
 
   it("stores only a normalized route-owned session automation assessment", () => {

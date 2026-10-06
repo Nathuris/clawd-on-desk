@@ -364,19 +364,28 @@ describe("面板窗口尺寸：主进程常量与 CSS 一致", () => {
   });
 
   it("菜单卡片的列表区与卡片高度两侧一致", () => {
-    assert.deepStrictEqual(hudTest.QUICK_MENU_CARD, { width: 300, session: 192, settings: 242 });
+    assert.deepStrictEqual(hudTest.QUICK_MENU_CARD, { width: 300, session: 192, settings: 262 });
     assert.strictEqual(hudTest.QUICK_MENU_GAP, 6);
     assert.match(sessionHudHtml, /body\.session-menu-open \.quick-menu-card \{ height: 192px; \}/);
-    assert.match(sessionHudHtml, /body\.settings-menu-open \.quick-menu-card \{ height: 242px; \}/);
+    assert.match(sessionHudHtml, /body\.settings-menu-open \.quick-menu-card \{ height: 262px; \}/);
     assert.match(sessionHudHtml, /body\.session-menu-open \.quick-session-list \{ height: 178px; \}/);
-    assert.match(sessionHudHtml, /body\.settings-menu-open \.quick-session-list \{ height: 228px; \}/);
+    assert.match(sessionHudHtml, /body\.settings-menu-open \.quick-session-list \{ height: 248px; \}/);
     assert.match(sessionHudHtml, /\.quick-session-item \{[\s\S]*?height: 28px;[\s\S]*?\}/);
     assert.match(sessionHudHtml, /\.quick-permission-item \{[\s\S]*?height: 44px;[\s\S]*?\}/);
     assert.match(sessionHudHtml, /\.quick-effort-block \{[\s\S]*?height: 44px;[\s\S]*?\}/);
     // 卡片本体 = 列表区 + 上下内边距 12 + 边框 2
     assert.strictEqual(178 + 6 + 6 + 2, hudTest.QUICK_MENU_CARD.session);
-    assert.strictEqual(228 + 6 + 6 + 2, hudTest.QUICK_MENU_CARD.settings);
+    assert.strictEqual(248 + 6 + 6 + 2, hudTest.QUICK_MENU_CARD.settings);
     assert.match(sessionHudHtml, /#hud \{[\s\S]*gap:\s*6px;[\s\S]*\}/);
+  });
+
+  it("设置菜单的算式成立（只读状态行 + 4 个权限项 + 强度块 + 行距）", () => {
+    // 18 + 4×44 + 44 + 5×2 = 248
+    assert.match(sessionHudHtml, /\.quick-live-row \{[\s\S]*?height:\s*18px;[\s\S]*?\}/);
+    assert.match(sessionHudHtml, /\.quick-live-label \{[\s\S]*?\}/);
+    assert.match(sessionHudHtml, /\.quick-live-value \{[\s\S]*?text-overflow:\s*ellipsis;[\s\S]*?\}/);
+    assert.strictEqual(18 + 4 * 44 + 44 + 5 * 2, 248);
+    assert.strictEqual(248 + 6 + 6 + 2, hudTest.QUICK_MENU_CARD.settings);
   });
 
   it("挂了附件时多出来的一行，两侧数字也一致", () => {

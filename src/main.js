@@ -928,6 +928,7 @@ const settingsWindowRuntime = createSettingsWindowRuntime({
 let lastSessionSnapshot = null;
 let terminalAppSender = null;
 let sessionPromptSend = null;
+let sessionControlSend = null;
 // 面板里粘贴进来的图片：落成临时文件再要路径（见 src/pasted-file-store.js）。
 let pastedFileStore = null;
 // 降级路线共用：发不出去的时候把话留在剪贴板里，别让用户白打一遍。
@@ -943,6 +944,7 @@ function copyPromptToClipboard(text) {
 (function initQuickSendLayer() {
   const { createTerminalAppSender } = require("./terminal-app-send");
   const { createSessionPromptSend } = require("./session-prompt-send");
+  const { createSessionControlSend } = require("./session-control-send");
   const { createPastedFileStore } = require("./pasted-file-store");
   // 面板里粘贴的图片落在这里；app.getPath("temp") 是系统给的临时目录，
   // 系统自己会清理，我们不去动它。
@@ -953,6 +955,12 @@ function copyPromptToClipboard(text) {
     terminalAppSender,
     copyText: copyPromptToClipboard,
     focusSession: (sessionId) => focusDashboardSession(sessionId),
+    log: (msg) => sessionLog(msg),
+  });
+  // 控制命令（目前只有改运行中会话的思考强度）走单独一条：只认 sent，
+  // 绝不退化成剪贴板 + 抢焦点（见 src/session-control-send.js 的文件头）。
+  sessionControlSend = createSessionControlSend({
+    terminalAppSender,
     log: (msg) => sessionLog(msg),
   });
 })();
@@ -1020,6 +1028,12 @@ function listQuickSessions() {
         cwd: entry.cwd || null,
         state: entry.state || null,
         agentId: entry.agentId || null,
+        // 「够不够得着去改它的设置」要看这三个：远程/WSL、headless、哪个 agent
+        host: entry.host || null,
+        headless: entry.headless === true,
+        // 会话当前的权限模式与强度（面板上那行"终端里：…"读它们）
+        permissionMode: entry.permissionMode || null,
+        effort: entry.effort || null,
         sourcePid: (runtime && runtime.sourcePid) || null,
         pidChain: (runtime && Array.isArray(runtime.pidChain)) ? runtime.pidChain : [],
       };
@@ -1094,6 +1108,11 @@ function buildQuickSendState() {
     // 新建会话的两个开关（渲染端按这组值画小按钮）。
     permissionMode: quickNewSessionPermissionMode,
     effort: quickNewSessionEffort,
+    // 目标会话**自己现在的**权限模式与强度（终端里的真值，hook 上报；
+    // 拿不到就是 null，渲染端显示"未知"，绝不猜）。注意它和上面那两个
+    // quickNewSession* 是两回事：那两个是"下次新建会话用什么档位"。
+    targetPermissionMode: target ? target.permissionMode : null,
+    targetEffort: target ? target.effort : null,
     // 开的是哪个菜单（null / "session" / "settings"）：状态源在主进程，窗口高度跟着变。
     menuOpen: getSessionHudMenuOpen(),
   };
@@ -5246,6 +5265,22 @@ function quickSetNewSessionOption(key, value) {
   return { status: "ok" };
 }
 
+// 面板上把强度**应用到当前目标**：目标是正在跑的本地 Claude Code 会话时，
+// 直接把官方的 /effort 命令送进那个会话（立刻生效）；目标是排队中的新会话
+// 或没有目标时，退化成"记成新会话默认档位"（和以前一样）。两种情况下都会
+// 更新内存里的默认档位，所以面板上的滑块始终只有一份含义。
+async function quickApplyEffort(level) {
+  const value = normalizeEffort(level);
+  if (value !== quickNewSessionEffort) quickNewSessionEffort = value;
+  const target = resolveQuickTarget();
+  let result = null;
+  if (sessionControlSend && typeof sessionControlSend.setEffort === "function") {
+    result = await sessionControlSend.setEffort({ level: value, session: target });
+  }
+  pushQuickState();
+  return result || { status: "skipped", reason: "no-channel" };
+}
+
 // 选「新建会话」落在哪个文件夹（系统文件夹选择框）。选中后只改内存里的值，
 // 下一次新建会话就开在那儿。
 async function quickPickNewSessionFolder() {
@@ -5359,6 +5394,7 @@ registerSessionIpc({
   quickPickFiles,
   quickSavePastedFile,
   quickSetNewSessionOption,
+  quickApplyEffort,
   quickSetMenuOpen,
   quickSetHold,
   quickSetAttachments,

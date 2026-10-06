@@ -12,6 +12,7 @@ const { createPidResolver, readStdinJsonDetailed, getPlatformConfig, applyOrcaPa
 const { updateRecoveryLeaseFromStateBody } = require("./session-recovery-lease");
 const { recordSessionHistoryFromStateBody } = require("./session-history");
 const { normalizeModelId } = require("./claude-rate-limits");
+const { normalizePermissionMode, normalizeEffort } = require("./session-mode-fields");
 // #634: the pid cache + lifecycle orchestration is owned by the shared resolver
 // now (hooks/shared-process.js); this adapter no longer touches pid-cache,
 // processAlive, or isWin directly.
@@ -663,6 +664,13 @@ function buildStateBody(event, payload, resolve) {
   // omits it). state.js merges it stickily, so one report is enough.
   const model = normalizeModelId(payload.model);
   if (model) body.model = model;
+  // 会话当前的权限模式与思考强度（面板上要显示"终端里现在是什么"）。
+  // SessionStart 两个都没有，Stop 才有 effort，所以 state.js 那边同样是
+  // 粘性合并：收到一次就记住。值在这里先卡一道白名单，服务端还会再验一次。
+  const permissionMode = normalizePermissionMode(payload.permission_mode);
+  if (permissionMode) body.permission_mode = permissionMode;
+  const effort = normalizeEffort(payload.effort);
+  if (effort) body.effort = effort;
   const toolName = typeof payload.tool_name === "string" && payload.tool_name ? payload.tool_name : null;
   const toolUseId = normalizeToolUseId(payload.tool_use_id ?? payload.toolUseId ?? payload.toolUseID);
   const toolInputFingerprint = buildToolInputFingerprint(

@@ -627,6 +627,44 @@ describe("state-session-snapshot builder", () => {
     assert.match(sessionSnapshotSignature(snapshot), /g-orphan/);
   });
 
+  it("会话当前的权限模式与强度进快照、也进签名（不然面板不会刷新）", () => {
+    const withModes = buildSessionSnapshot(new Map([
+      ["s1", session("idle", {
+        updatedAt: 1000,
+        cwd: "/tmp/p",
+        agentId: "claude-code",
+        permissionMode: "plan",
+        effort: "xhigh",
+      })],
+    ]), { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null });
+    const entry = withModes.sessions.find((item) => item.id === "s1");
+    assert.strictEqual(entry.permissionMode, "plan");
+    assert.strictEqual(entry.effort, "xhigh");
+
+    // 只在模式上不同 -> 签名必须不同，否则面板收不到更新
+    const changed = buildSessionSnapshot(new Map([
+      ["s1", session("idle", {
+        updatedAt: 1000,
+        cwd: "/tmp/p",
+        agentId: "claude-code",
+        permissionMode: "acceptEdits",
+        effort: "xhigh",
+      })],
+    ]), { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null });
+    assert.notStrictEqual(
+      sessionSnapshotSignature(changed),
+      sessionSnapshotSignature(withModes)
+    );
+
+    // 会话没上报过就老老实实是 null，不拿别的值顶上
+    const unknown = buildSessionSnapshot(new Map([
+      ["s2", session("idle", { updatedAt: 1, cwd: "/tmp/q", agentId: "claude-code" })],
+    ]), { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null });
+    const blank = unknown.sessions.find((item) => item.id === "s2");
+    assert.strictEqual(blank.permissionMode, null);
+    assert.strictEqual(blank.effort, null);
+  });
+
   it("builds ordered dashboard/menu groups and HUD summary with injected deps", () => {
     const sessions = new Map([
       ["old-working", session("working", {

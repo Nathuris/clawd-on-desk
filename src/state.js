@@ -2007,6 +2007,10 @@ function updateSession(sessionId, state, event, opts = {}) {
     headless = false,
     platform = null,
     model = null,
+    // 会话当前的权限模式与思考强度（Claude Code hook 上报，面板用来显示
+    // 终端里现在是什么）。和 model 一样是粘性合并：没带的更新不会清掉旧值。
+    permissionMode = null,
+    effort = null,
     provider = null,
     codexOriginator = null,
     codexSource = null,
@@ -2158,6 +2162,8 @@ function updateSession(sessionId, state, event, opts = {}) {
       const srcHeadless = headless || (existing && existing.headless) || false;
       const srcPlatform = platform || (existing && existing.platform) || null;
       const srcModel = model || (existing && existing.model) || null;
+      const srcPermissionMode = permissionMode || (existing && existing.permissionMode) || null;
+      const srcEffort = effort || (existing && existing.effort) || null;
       const srcProvider = provider || (existing && existing.provider) || null;
       const srcCodexOriginator = codexOriginator || (existing && existing.codexOriginator) || null;
       const srcCodexSource = codexSource || (existing && existing.codexSource) || null;
@@ -2203,6 +2209,8 @@ function updateSession(sessionId, state, event, opts = {}) {
         headless: srcHeadless,
         platform: srcPlatform,
         model: srcModel,
+        permissionMode: srcPermissionMode,
+        effort: srcEffort,
         provider: srcProvider,
         codexOriginator: srcCodexOriginator,
         codexSource: srcCodexSource,
@@ -2295,6 +2303,8 @@ function updateSession(sessionId, state, event, opts = {}) {
   const srcHeadless = headless || (existing && existing.headless) || false;
   const srcPlatform = platform || (existing && existing.platform) || null;
   const srcModel = model || (existing && existing.model) || null;
+  const srcPermissionMode = permissionMode || (existing && existing.permissionMode) || null;
+  const srcEffort = effort || (existing && existing.effort) || null;
   const srcProvider = provider || (existing && existing.provider) || null;
   const srcCodexOriginator = codexOriginator || (existing && existing.codexOriginator) || null;
   const srcCodexSource = codexSource || (existing && existing.codexSource) || null;
@@ -2608,7 +2618,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     clearSubagentTracker(subagentTracker);
   }
 
-  const base = { sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, orcaPaneKey: srcOrcaPaneKey, agentPid: srcAgentPid, agentId: srcAgentId, profileId: (existing && existing.profileId) || profileId || "local", rawSessionId: (existing && existing.rawSessionId) || rawSessionId || sessionId, sessionAutomationIdentity: srcSessionAutomationIdentity, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, contextUsage: srcContextUsage, contextUsageOrigin: srcContextUsageOrigin, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true, claudeBackgroundSubagentHoldAt };
+  const base = { sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, orcaPaneKey: srcOrcaPaneKey, agentPid: srcAgentPid, agentId: srcAgentId, profileId: (existing && existing.profileId) || profileId || "local", rawSessionId: (existing && existing.rawSessionId) || rawSessionId || sessionId, sessionAutomationIdentity: srcSessionAutomationIdentity, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, permissionMode: srcPermissionMode, effort: srcEffort, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, contextUsage: srcContextUsage, contextUsageOrigin: srcContextUsageOrigin, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true, claudeBackgroundSubagentHoldAt };
   if (preserveCompletionAck) base.requiresCompletionAck = true;
   // #862: every branch below rebuilds the session object from `base`; carry the
   // private identity tracker through without exposing it on snapshot surfaces.

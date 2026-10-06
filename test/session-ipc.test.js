@@ -104,6 +104,8 @@ function createHarness(overrides = {}) {
           }),
         quickSetMenuOpen: overrides.quickSetMenuOpen
           || ((menu) => { calls.push(["quickSetMenuOpen", menu]); return { status: "ok" }; }),
+        quickApplyEffort: overrides.quickApplyEffort
+          || ((level) => { calls.push(["quickApplyEffort", level]); return { status: "sent" }; }),
         quickSetHold: overrides.quickSetHold
           || ((reason, held) => { calls.push(["quickSetHold", reason, held]); }),
         quickSetClickThrough: overrides.quickSetClickThrough
@@ -225,6 +227,7 @@ test("session IPC registers owned channels and disposes them", () => {
     "dashboard:resume-session",
     "dashboard:set-session-alias",
     "dashboard:set-session-automation",
+    "session-hud:apply-effort",
     "session-hud:cancel-pending-session",
     "session-hud:get-i18n",
     "session-hud:new-session",
@@ -818,6 +821,35 @@ test("set-new-session-option 的载荷闸门：键与值都必须在允许表里
   ]);
 });
 
+test("apply-effort 的载荷闸门：只认一个 level，且必须在允许表里", async () => {
+  const { ipcMain, calls, trustedHudEvent } = createHarness();
+
+  const bad = [
+    undefined,
+    null,
+    [],
+    "high",
+    {},
+    { level: "turbo" },
+    { level: "high " },
+    { level: "HIGH" },
+    { level: "high; rm -rf /" },
+    { level: "high", extra: 1 },
+    { level: "" },
+  ];
+  for (const payload of bad) {
+    const result = await ipcMain.invokeFrom(trustedHudEvent, "session-hud:apply-effort", payload);
+    assert.deepStrictEqual(result, { status: "invalid" }, JSON.stringify(payload));
+  }
+  assert.deepStrictEqual(calls, [], "非法载荷不得触达 owner");
+
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:apply-effort", { level: "xhigh" }),
+    { status: "sent" }
+  );
+  assert.deepStrictEqual(calls, [["quickApplyEffort", "xhigh"]]);
+});
+
 test("pick-file 只认 HUD 主 frame，并把路径交回渲染端", async () => {
   const { ipcMain, calls, trustedHudEvent, hudWebContents, hudMainFrame } = createHarness();
   assert.deepStrictEqual(
@@ -918,6 +950,7 @@ test("new-session / pick-folder 只认 HUD 主 frame", async () => {
   const forged = { sender: hudWebContents, senderFrame: { ...hudMainFrame } };
   for (const channel of [
     "session-hud:new-session",
+    "session-hud:apply-effort",
     "session-hud:cancel-pending-session",
     "session-hud:pick-folder",
   ]) {

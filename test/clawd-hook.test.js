@@ -161,6 +161,39 @@ describe("buildStateBody", () => {
     assert.strictEqual(body.model, undefined);
   });
 
+  it("把会话当前的权限模式与强度原样报上去（面板要显示「终端里现在是什么」）", () => {
+    const body = buildStateBody(
+      "UserPromptSubmit",
+      { session_id: "sid-mode", permission_mode: "plan" },
+      mockResolve
+    );
+    assert.strictEqual(body.permission_mode, "plan");
+    // 强度只在 Stop 那条上带，形状是 { level }
+    const stop = buildStateBody(
+      "Stop",
+      { session_id: "sid-mode", permission_mode: "plan", effort: { level: "xhigh" } },
+      mockResolve
+    );
+    assert.strictEqual(stop.permission_mode, "plan");
+    assert.strictEqual(stop.effort, "xhigh");
+  });
+
+  it("SessionStart 不带这两个字段（那时候还没有），就当没报", () => {
+    const body = buildStateBody("SessionStart", { session_id: "sid-fresh" }, mockResolve);
+    assert.strictEqual(body.permission_mode, undefined);
+    assert.strictEqual(body.effort, undefined);
+  });
+
+  it("没见过的模式/强度丢掉，不往面板上画", () => {
+    const body = buildStateBody(
+      "Stop",
+      { session_id: "sid-bad", permission_mode: "yolo", effort: { level: "turbo" } },
+      mockResolve
+    );
+    assert.strictEqual(body.permission_mode, undefined);
+    assert.strictEqual(body.effort, undefined);
+  });
+
   for (const [label, model] of [
     ["blank", "  \t "],
     ["overlong", "m".repeat(129)],

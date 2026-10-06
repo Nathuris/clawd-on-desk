@@ -799,6 +799,34 @@ describe("server-route-state POST", () => {
     assert.strictEqual(turns.size, 0);
   });
 
+  it("权限模式与强度按白名单归一化（信任边界重验，脏值不进会话）", async () => {
+    const ok = await callStatePost(JSON.stringify({
+      state: "working",
+      session_id: "sid-mode",
+      event: "Stop",
+      agent_id: "claude-code",
+      permission_mode: "manual",     // 命令行写法 -> 内部叫 default
+      effort: { level: "high" },     // Stop 那条给的是对象
+    }));
+    assert.strictEqual(ok.statusCode, 200);
+    const okOpts = ok.calls.updateSession[0][3];
+    assert.strictEqual(okOpts.permissionMode, "default");
+    assert.strictEqual(okOpts.effort, "high");
+
+    const bad = await callStatePost(JSON.stringify({
+      state: "working",
+      session_id: "sid-mode-bad",
+      event: "Stop",
+      agent_id: "claude-code",
+      permission_mode: "yolo",
+      effort: { level: "turbo" },
+    }));
+    assert.strictEqual(bad.statusCode, 200);
+    const badOpts = bad.calls.updateSession[0][3];
+    assert.strictEqual(badOpts.permissionMode, null);
+    assert.strictEqual(badOpts.effort, null);
+  });
+
   it("passes normalized metadata to updateSession", async () => {
     const res = await callStatePost(JSON.stringify({
       state: "working",
@@ -854,6 +882,9 @@ describe("server-route-state POST", () => {
         headless: true,
         platform: "webui",
         model: "gpt-5.4",
+        // 这条 payload 没带这两个字段，归一化后就是 null（粘性合并留给 state.js）
+        permissionMode: null,
+        effort: null,
         provider: "openai",
         codexOriginator: "codex_work_desktop",
         codexSource: "vscode",

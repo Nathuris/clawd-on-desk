@@ -13,6 +13,12 @@ const {
   CLAWD_PROCESS_INSTANCE_HEADER,
 } = require("../hooks/server-config");
 const { isCodexDesktopOriginator } = require("../hooks/codex-originator");
+// 权限模式 / 思考强度的白名单与 hook 侧共用一份（hooks/session-mode-fields.js），
+// 免得两边各写一套、将来对不上。
+const {
+  normalizePermissionMode: normalizeSessionPermissionMode,
+  normalizeEffort: normalizeSessionEffort,
+} = require("../hooks/session-mode-fields");
 const {
   assessWindowsProcessChainRequest,
   buildShadowComparison,
@@ -362,6 +368,12 @@ function handleStatePost(req, res, options) {
       const model = typeof data.model === "string" && data.model.trim()
         ? data.model.trim()
         : null;
+      // 会话当前的权限模式与思考强度（面板上显示"终端里现在是什么"）。
+      // hook 上报前已经卡过一道（hooks/session-mode-fields.js），这里是信任
+      // 边界，按规矩重验一遍：只放行 CLI 认识的那几个值，其余丢掉。
+      // `manual` 是 --permission-mode 的写法，等同内部的 default。
+      const permissionMode = normalizeSessionPermissionMode(data.permission_mode);
+      const effort = normalizeSessionEffort(data.effort);
       const provider = typeof data.provider === "string" && data.provider.trim()
         ? data.provider.trim()
         : null;
@@ -1034,6 +1046,8 @@ function handleStatePost(req, res, options) {
             headless: headless || codexHookState.headless === true,
             platform,
             model,
+            permissionMode,
+            effort,
             provider,
             codexOriginator,
             codexSource,

@@ -46,6 +46,8 @@ contextBridge.exposeInMainWorld("sessionHudAPI", {
   // 切「新建会话」的权限模式 / 思考强度（key ∈ permissionMode / effort）。
   setNewSessionOption: (key, value) =>
     ipcRenderer.invoke("session-hud:set-new-session-option", { key, value }),
+  // 把强度应用到当前目标（正在跑的会话会被送一条官方 /effort 命令）。
+  applyEffort: (level) => ipcRenderer.invoke("session-hud:apply-effort", { level }),
   // 指针进出卡片：卡片外的透明区放行点击（单向、高频，用 send）。
   setClickThrough: (through) => ipcRenderer.send("session-hud:set-click-through", { through: !!through }),
   setHold: (reason, held) => ipcRenderer.send("session-hud:set-hold", { reason, held }),

@@ -41,6 +41,9 @@ let sessionListEl = null;
 let promptInputEl = null;
 let attachBtnEl = null;
 let attachRowEl = null;
+// 设置菜单最上面那行只读状态（终端里现在是什么），菜单重建时换新节点。
+let liveLabelEl = null;
+let liveValueEl = null;
 
 // 挂在输入框上的附件（发送时跟着消息一起走）。路径不进输入框——一长串路径
 // 挤在里面就没法打字了，所以在这儿存着，界面上只显示文件名。
@@ -88,6 +91,10 @@ function normalizeQuickState(raw) {
     // 新建会话的两个开关（主进程是唯一状态源，取不到就都算没选，不画高亮）。
     permissionMode: typeof s.permissionMode === "string" && s.permissionMode ? s.permissionMode : "",
     effort: typeof s.effort === "string" && s.effort ? s.effort : "",
+    // 目标会话**自己现在的**模式与强度（终端里的真值）。取不到就是空串，
+    // 界面上显示「未知」——绝不拿上面那两个"新会话档位"顶上。
+    targetPermissionMode: typeof s.targetPermissionMode === "string" ? s.targetPermissionMode : "",
+    targetEffort: typeof s.targetEffort === "string" ? s.targetEffort : "",
     // 排好的新会话占位（列表第一行）。
     pendingId: typeof s.pendingId === "string" && s.pendingId ? s.pendingId : null,
     pendingLaunched: s.pendingLaunched === true,
@@ -176,6 +183,8 @@ function updateMenu() {
   if (!sessionListEl) return;
   if (!quickState.menuOpen) {
     settingsMenuEls = null;
+    liveLabelEl = null;
+    liveValueEl = null;
     if (sessionListEl.children.length) sessionListEl.replaceChildren();
     return;
   }
@@ -243,6 +252,65 @@ const EFFORT_OPTIONS = [
   { value: "max", labelKey: "hudQuickEffortMax" },
 ];
 
+// 终端里**真实**的模式名 → 面板上的字。CLI 内部把"每步都问"叫 default，
+// 命令行参数写作 manual，两个都归到「手动」。面板自己那 4 档之外的
+// （不问 / 跳过确认）也要如实显示——显示成别的档比显示"未知"更糟。
+const LIVE_MODE_LABEL_KEYS = {
+  default: "hudQuickPermissionManual",
+  manual: "hudQuickPermissionManual",
+  acceptEdits: "hudQuickPermissionEdits",
+  plan: "hudQuickPermissionPlan",
+  auto: "hudQuickPermissionAuto",
+  dontAsk: "hudQuickModeDontAsk",
+  bypassPermissions: "hudQuickModeBypass",
+};
+const LIVE_EFFORT_LABEL_KEYS = {
+  low: "hudQuickEffortLow",
+  medium: "hudQuickEffortMedium",
+  high: "hudQuickEffortHigh",
+  xhigh: "hudQuickEffortXHigh",
+  max: "hudQuickEffortMax",
+};
+
+// 「终端里：计划 · 高」这一行读什么：目标是运行中的会话就读**会话自己上报的**
+// 值（那才是终端里的真值）；目标是排队中的新会话，它还没跑起来，读新会话档位
+// 就是它的真值。取不到一律显示「未知」——绝不拿另一份值顶上。
+function liveStateParts() {
+  const isSession = !quickState.targetPending && !!quickState.targetId;
+  const mode = isSession ? quickState.targetPermissionMode : quickState.permissionMode;
+  const effort = isSession ? quickState.targetEffort : quickState.effort;
+  return {
+    labelKey: isSession ? "hudQuickLiveSessionLabel" : "hudQuickLivePendingLabel",
+    mode: LIVE_MODE_LABEL_KEYS[mode] ? t(LIVE_MODE_LABEL_KEYS[mode]) : t("hudQuickLiveUnknown"),
+    effort: LIVE_EFFORT_LABEL_KEYS[effort] ? t(LIVE_EFFORT_LABEL_KEYS[effort]) : t("hudQuickLiveUnknown"),
+  };
+}
+
+// 设置菜单最上面那行只读状态。建好把两个节点记下来，之后背景变化只改文字。
+function createLiveRow() {
+  const row = document.createElement("div");
+  row.className = "quick-live-row";
+  liveLabelEl = document.createElement("span");
+  liveLabelEl.className = "quick-live-label";
+  liveValueEl = document.createElement("span");
+  liveValueEl.className = "quick-live-value";
+  row.appendChild(liveLabelEl);
+  row.appendChild(liveValueEl);
+  // 悬停提示：运行中的会话怎么改权限模式（面板不代劳）
+  row.title = t("hudQuickLiveHint");
+  refreshLiveRow();
+  return row;
+}
+
+function refreshLiveRow() {
+  if (!liveLabelEl || !liveValueEl) return;
+  const parts = liveStateParts();
+  const label = t(parts.labelKey);
+  const value = `${parts.mode} · ${parts.effort}`;
+  if (liveLabelEl.textContent !== label) liveLabelEl.textContent = label;
+  if (liveValueEl.textContent !== value) liveValueEl.textContent = value;
+}
+
 function createSessionList() {
   sessionListEl = document.createElement("div");
   sessionListEl.className = "quick-session-list";
@@ -260,6 +328,8 @@ function renderMenu() {
 function patchSettingsMenu() {
   const els = settingsMenuEls;
   if (!els) return;
+  // 开着菜单时终端里换了模式/强度 -> 这行字跟着变（它读的是会话上报的真值）
+  refreshLiveRow();
   for (const [value, item] of els.items) {
     if (item.classList.contains("is-selected") !== (quickState.permissionMode === value)) {
       item.classList.toggle("is-selected", quickState.permissionMode === value);
@@ -350,11 +420,12 @@ function renderSessionMenu() {
 // 建完把关键节点记下来，之后状态变化走 patchSettingsMenu 就地更新。
 function renderSettingsMenu() {
   const items = new Map();
-  const nodes = PERMISSION_OPTIONS.map((option) => {
+  const nodes = [createLiveRow()];
+  for (const option of PERMISSION_OPTIONS) {
     const item = createPermissionItem(option);
     items.set(option.value, item);
-    return item;
-  });
+    nodes.push(item);
+  }
   const effort = createEffortBlock();
   nodes.push(effort.block);
   sessionListEl.replaceChildren(...nodes);
@@ -414,8 +485,13 @@ function createEffortBlock() {
     const option = EFFORT_OPTIONS[Number(slider.value)];
     if (option) {
       valueEl.textContent = t(option.labelKey);
+      // 拖动过程中只更新默认档位（便宜），不发控制命令——松手才发（见下面）
       handleSettingPick("effort", option.value);
     }
+  });
+  slider.addEventListener("change", () => {
+    const option = EFFORT_OPTIONS[Number(slider.value)];
+    if (option) handleApplyEffort(option.value);
   });
   block.appendChild(slider);
 
@@ -788,6 +864,25 @@ async function handleSettingPick(optionKey, value) {
     console.warn("set new session option threw:", err);
     showQuickFeedback(t("hudQuickOptionFailed"), true);
   }
+}
+
+// 强度滑块**松手**时，把这个档位应用到当前目标：目标是正在跑的本地 Claude Code
+// 会话时，主进程会往那个终端里送一条官方 /effort 命令（立刻就改）；目标是排队中
+// 的新会话/没有会话时，主进程只记成默认档位，这种情况不弹提示（面板上那行
+//「新会话：…」已经说明白了）。失败如实说，不装作改好了。
+async function handleApplyEffort(level) {
+  let result = null;
+  try {
+    result = await window.sessionHudAPI.applyEffort(level);
+  } catch (err) {
+    console.warn("apply effort threw:", err);
+    showQuickFeedback(t("hudControlEffortFailed"), true);
+    return;
+  }
+  const status = result && result.status;
+  if (status === "sent") showQuickFeedback(t("hudControlEffortSent"));
+  else if (status === "unsupported") showQuickFeedback(t("hudControlEffortUnsupported"), true);
+  else if (status === "failed") showQuickFeedback(t("hudControlEffortFailed"), true);
 }
 
 // 选「新建会话」落在哪个文件夹：主进程弹系统文件夹选择框，选完把新的位置

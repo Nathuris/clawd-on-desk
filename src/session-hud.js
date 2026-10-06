@@ -37,8 +37,8 @@ const QUICK_CARD = Object.freeze({ width: 300, height: 66 });
 //
 // 菜单卡片本体 = 列表区 + 上下内边距 12 + 边框 2：
 //   会话：列表区 178（4 条会话 4×28 ＋ 新建 28 ＋ 选文件夹 28 ＋ 行距 5×2）→ 192
-//   设置：列表区 228（4 个权限项 4×44 ＋ 强度块 44 ＋ 行距 4×2）→ 242
-const QUICK_MENU_CARD = Object.freeze({ width: 300, session: 192, settings: 242 });
+//   设置：列表区 248（只读状态行 18 ＋ 4 个权限项 4×44 ＋ 强度块 44 ＋ 行距 5×2）→ 262
+const QUICK_MENU_CARD = Object.freeze({ width: 300, session: 192, settings: 262 });
 // 两张卡片之间的间距（#hud 的 gap）。
 const QUICK_MENU_GAP = 6;
 // 挂了附件时主卡片多出来的一行小标签：行高 24 + 卡片自己的一个行距 4 = 28。

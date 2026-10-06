@@ -350,6 +350,19 @@ function registerSessionIpc(options = {}) {
     if (!allowed || !allowed.includes(payload.value)) return { status: "invalid" };
     return hudAction(event, options.quickSetNewSessionOption, [payload.key, payload.value]);
   });
+  // 把强度**应用到当前目标**：目标是正在跑的本地 Claude Code 会话时，主进程
+  // 会把官方的 /effort 命令送进那个会话。渲染端只在"松手"（change）时调它，
+  // 拖动过程中走上面的 set-new-session-option，免得每动一格就发一条命令。
+  handle("session-hud:apply-effort", (event, payload) => {
+    const rejected = rejectUntrustedHudEvent(event);
+    if (rejected) return rejected;
+    const keys = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? Object.keys(payload)
+      : [];
+    if (keys.length !== 1 || keys[0] !== "level") return { status: "invalid" };
+    if (!EFFORT_LEVELS.includes(payload.level)) return { status: "invalid" };
+    return hudAction(event, options.quickApplyEffort, [payload.level]);
+  });
   // 指针进出卡片时上报：卡片外的透明区让点击穿透到下面的应用。
   // 单向 send（高频、不需要回执），主进程侧另有轮询兜底。
   on("session-hud:set-click-through", (event, payload) => {
