@@ -70,6 +70,7 @@ docs/**
 !docs/releases/release-v1.0.0.md
 !docs/releases/release-v1.1.0.md
 !docs/releases/release-v1.2.0.md
+!docs/releases/release-v1.3.0.md
 
 # Temp files from testing
 .tmp_*
