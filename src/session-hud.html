@@ -8,21 +8,36 @@
 * { box-sizing: border-box; }
 
 :root {
-  --hud-bg: rgba(255, 255, 255, 0.88);
-  --hud-border: rgba(0, 0, 0, 0.12);
-  --text: #242427;
-  --text-muted: #6b6b70;
-  --shadow: rgba(0, 0, 0, 0.16);
-  --interrupted: #d97706;
+  --hud-bg: rgba(255, 255, 255, 0.72);
+  --hud-bg-strong: rgba(255, 255, 255, 0.9);
+  --hud-border: rgba(0, 0, 0, 0.1);
+  --text: #1c1c1e;
+  --text-muted: #6e6e73;
+  --shadow: rgba(0, 0, 0, 0.18);
+  --card-highlight: rgba(255, 255, 255, 0.4);
+  --accent: #0a84ff;
+  --accent-soft: rgba(10, 132, 255, 0.14);
+  --dot-idle: #98989d;
+  --dot-working: #30d158;
+  --dot-pending: #0a84ff;
+  --interrupted: #ff9f0a;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --hud-bg: rgba(32, 32, 36, 0.88);
+    --hud-bg: rgba(30, 30, 34, 0.72);
+    --hud-bg-strong: rgba(44, 44, 48, 0.92);
     --hud-border: rgba(255, 255, 255, 0.12);
-    --text: #f4f4f5;
-    --text-muted: #a1a1aa;
-    --shadow: rgba(0, 0, 0, 0.34);
+    --text: #f5f5f7;
+    --text-muted: #98989d;
+    --shadow: rgba(0, 0, 0, 0.5);
+    --card-highlight: rgba(255, 255, 255, 0.12);
+    --accent: #0a84ff;
+    --accent-soft: rgba(10, 132, 255, 0.22);
+    --dot-idle: #636366;
+    --dot-working: #30d158;
+    --dot-pending: #0a84ff;
+    --interrupted: #ff9f0a;
   }
 }
 
@@ -44,41 +59,76 @@ html, body {
    太小的话系统会认为光标下面放不下，把候选窗翻到输入框上方被卡片盖住。 */
 body { padding: 2px 3px 60px; }
 
-/* 卡片贴底排列：展开时窗口向上变大，卡片底边因此钉住不动，只往上长。 */
+/* 两张卡片上下叠：上面是菜单卡片（开着才占位），下面是主卡片。整体贴底——
+   窗口变高时主卡片底边钉住不动，多出来的高度全在它上面。 */
 #hud {
   height: 100%;
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
-/* 卡片：宽度由窗口撑满（300px 卡片 + 左右各 3px 壳 = 306px 窗口） */
+/* 主卡片：宽度由窗口撑满（300px 卡片 + 左右各 3px 壳 = 306px 窗口）。
+   毛玻璃：半透明底 + backdrop 模糊；内高光（inset）给玻璃一条亮边，比生硬的
+   1px 边框更像 macOS 原生浮层。backdrop-filter 对窗口内元素始终有效，对桌面
+   那侧则取决于系统合成器——底子已经半透明，透出来的感觉很够。 */
 .quick-card {
   width: 100%;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 6px 8px;
   border: 1px solid var(--hud-border);
-  border-radius: 8px;
+  border-radius: 14px;
   background: var(--hud-bg);
-  box-shadow: 0 8px 18px -12px var(--shadow), 0 2px 4px rgba(0, 0, 0, 0.10);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: 0 0 0 0.5px var(--card-highlight) inset, 0 10px 30px -10px var(--shadow), 0 2px 6px rgba(0, 0, 0, 0.06);
   overflow: hidden;
 }
 
-/* 默认两行：6 + 16 + 4 + 32 + 6 + 2 = 66px。主进程按同一组数字算窗口高度。 */
+/* 默认两行：6 + 16 + 4 + 32 + 6 + 2 = 66px。主进程按同一组数字算窗口高度。
+   注意：开菜单时主卡片自己**一点不变**——菜单是上面另一张卡片。 */
 .quick-card { height: 66px; }
 
-/* 展开会话列表：列表区 250px（4 条会话 4×28 + 新建 28 + 两个开关 34+34 +
-   选文件夹 28 + 行距 7×2）→ 66 + 250 + 4 = 320px。
-   和当初的二级菜单一样，展开时靠 overflow:hidden 裁切、卡片只往上长。 */
-body.session-list-open .quick-card { height: 320px; }
-
-/* 挂了附件：多一行 24px 的小标签（输入框上方），再加卡片自己的一个行距 4。
-   多出来的高度同样往上长，输入框的位置一动不动。
-   这两条必须排在前面两条之后（同特异性、后者胜）；主进程那边由
-   src/session-hud.js 的 quickCardHeight(listOpen, hasAttachments) 算同一个数。 */
+/* 挂了附件：主卡片多一行 24px 的小标签（输入框上方）+ 一个行距 4 = +28。
+   主进程那边由 src/session-hud.js 的 quickCardHeight(menu, hasAttachments) 算同一个数。 */
 body.has-attachments .quick-card { height: 94px; }
-body.session-list-open.has-attachments .quick-card { height: 348px; }
+
+/* ===== 菜单卡片（主卡片上面那张独立卡片，开着才出现） =====
+   点状态行 → 会话菜单；点齿轮 → 设置菜单。它是**另一张卡片**：主卡片高度一点
+   不变，菜单卡片在主卡片上方淡入（不再是把整张卡片拉高）。
+   卡片本体的高度 = 内容 + 上下内边距 12 + 边框 2：
+     会话 178 + 14 = 192；设置 228 + 14 = 242。
+   窗口整体高度 = 主卡片 + 6px 间距 + 菜单卡片，由主进程按同一组数字算。 */
+.quick-menu-card {
+  display: none;
+  width: 100%;
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border: 1px solid var(--hud-border);
+  border-radius: 14px;
+  background: var(--hud-bg);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: 0 0 0 0.5px var(--card-highlight) inset, 0 10px 30px -10px var(--shadow), 0 2px 6px rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+  opacity: 1;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+body.session-menu-open .quick-menu-card,
+body.settings-menu-open .quick-menu-card { display: flex; }
+body.session-menu-open .quick-menu-card { height: 192px; }
+body.settings-menu-open .quick-menu-card { height: 242px; }
+
+/* 淡入：从透明 + 稍微靠下一点浮上来（@starting-style 是首帧样式，Chromium 支持） */
+@starting-style {
+  body.session-menu-open .quick-menu-card,
+  body.settings-menu-open .quick-menu-card { opacity: 0; transform: translateY(6px); }
+}
 
 /* ===== 状态行（第 1 行，16px 单行省略） ===== */
 .quick-status-row {
@@ -104,9 +154,27 @@ body.session-list-open.has-attachments .quick-card { height: 348px; }
   color: var(--interrupted);
 }
 
+/* 状态圆点：绿=在跑、灰=空闲、蓝=新会话在启动。一眼看懂目标状态，不用读字。 */
+.quick-status-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dot-idle);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06) inset;
+}
+.quick-status-dot.is-working { background: var(--dot-working); }
+.quick-status-dot.is-pending { background: var(--dot-pending); animation: status-pulse 1.6s ease-in-out infinite; }
+
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
 /* ===== 目标会话按钮（整行可点，点开是会话列表） ===== */
 .quick-target-btn {
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   height: 16px;
   display: flex;
   align-items: center;
@@ -126,17 +194,43 @@ body.session-list-open.has-attachments .quick-card { height: 348px; }
   line-height: 1;
   color: var(--text-muted);
 }
-body.session-list-open .quick-target-caret { transform: rotate(180deg); }
+body.session-menu-open .quick-target-caret { transform: rotate(180deg); }
 
-/* ===== 会话列表（展开时 250px：4 条会话 + 新建 + 两个开关 + 选文件夹） ===== */
+/* 「⚙」按钮：输入框右边，和左边的「＋」一样大的方块，点开「设置」菜单
+   （权限 + 强度）。只画齿轮不写字——这一行的宽度要留给输入框。 */
+.quick-settings-btn {
+  flex: 0 0 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.quick-settings-btn:hover { color: var(--text); background: rgba(127, 127, 127, 0.18); }
+.quick-settings-btn.is-open { color: var(--accent); background: var(--accent-soft); }
+.quick-settings-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.quick-settings-icon { font-size: 13px; line-height: 1; }
+
+/* ===== 菜单列表（两个菜单共用这个容器，展开高度不同） ===== */
 .quick-session-list {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  height: 0;
   overflow: hidden;
 }
-body.session-list-open .quick-session-list { height: 250px; }
+/* 会话菜单：最多 4 条会话（4×28）+ 新建（28）+ 选文件夹（28）+ 行距 5×2 = 178 */
+body.session-menu-open .quick-session-list { height: 178px; }
+/* 设置菜单：4 个权限项（4×44）+ 强度块（44）+ 行距 4×2 = 228 */
+body.settings-menu-open .quick-session-list { height: 228px; }
 
 .quick-session-item {
   flex: 0 0 28px;
@@ -156,7 +250,7 @@ body.session-list-open .quick-session-list { height: 250px; }
   overflow: hidden;
 }
 .quick-session-item:hover { background: rgba(127, 127, 127, 0.14); }
-.quick-session-item.is-active { background: rgba(59, 130, 246, 0.14); }
+.quick-session-item.is-active { background: var(--accent-soft); }
 .quick-session-name {
   font-size: 12px;
   line-height: 1.2;
@@ -172,13 +266,12 @@ body.session-list-open .quick-session-list { height: 250px; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.quick-session-create .quick-session-name { color: rgba(59, 130, 246, 0.95); }
+.quick-session-create .quick-session-name { color: var(--accent); }
 /* 选文件夹是次要动作：不抢新建会话那一行的蓝色。 */
 .quick-session-folder .quick-session-name { color: var(--text-muted); }
 .quick-session-item:focus { outline: none; }
 .quick-session-item:focus-visible,
-.quick-chip:focus-visible,
-.quick-target-btn:focus-visible { outline: 2px solid rgba(59, 130, 246, 0.6); outline-offset: 1px; }
+.quick-target-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ===== 排好的新会话（第一行，28px：整行可点 + 右边 ✕ 取消） ===== */
 .quick-pending-row {
@@ -194,7 +287,7 @@ body.session-list-open .quick-session-list { height: 250px; }
   flex: 1 1 auto;
   min-width: 0;
 }
-.quick-session-pending .quick-session-name { color: rgba(59, 130, 246, 0.95); }
+.quick-session-pending .quick-session-name { color: var(--accent); }
 
 .quick-pending-cancel {
   flex: 0 0 20px;
@@ -209,54 +302,124 @@ body.session-list-open .quick-session-list { height: 250px; }
 }
 .quick-pending-cancel:hover { background: rgba(127, 127, 127, 0.18); color: var(--text); }
 
-/* ===== 新建会话的两个开关（权限模式 / 思考强度，各 34px：标签一行 + 按钮一行） ===== */
-.quick-setting-row {
-  flex: 0 0 34px;
-  height: 34px;
+/* ===== 设置菜单：权限列表（每项 44px，大字名称 + 小字解释） ===== */
+.quick-permission-item {
+  flex: 0 0 44px;
+  height: 44px;
   min-width: 0;
   display: flex;
   flex-direction: column;
   justify-content: center;
   gap: 2px;
-  padding: 0 8px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.quick-permission-item:hover { background: rgba(127, 127, 127, 0.12); }
+.quick-permission-item.is-selected { background: var(--accent-soft); }
+.quick-permission-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.quick-permission-name {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.quick-permission-item.is-selected .quick-permission-name { color: var(--accent); }
+
+.quick-permission-desc {
+  font-size: 10px;
+  line-height: 1.25;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.quick-setting-label {
-  flex: 0 0 auto;
+/* ===== 设置菜单：强度滑块（44px，标签 + 5 档滑块 + 两端刻度） ===== */
+.quick-effort-block {
+  flex: 0 0 44px;
+  height: 44px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 10px;
+}
+
+.quick-effort-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.quick-effort-label {
   font-size: 10px;
   line-height: 1;
   color: var(--text-muted);
 }
 
-/* 按钮最多 6 个（默认 + 五档），占满整行宽度；真放不下时宁可裁掉尾巴，
-   也不让整行换行——卡片高度是写死的一组数字。 */
-.quick-setting-chips {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  overflow: hidden;
+.quick-effort-value {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--accent);
 }
 
-.quick-chip {
+/* 原生滑块换个皮肤：5 档（0..4），拖动即切换。 */
+.quick-effort-slider {
   flex: 0 0 auto;
-  height: 18px;
-  padding: 0 7px;
-  border: 0;
-  border-radius: 5px;
-  background: rgba(127, 127, 127, 0.14);
-  color: var(--text);
-  font: inherit;
-  font-size: 10px;
-  line-height: 1;
-  white-space: nowrap;
+  width: 100%;
+  height: 14px;
+  margin: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
   cursor: pointer;
 }
-.quick-chip:hover { background: rgba(127, 127, 127, 0.24); }
-.quick-chip.is-selected {
-  background: rgba(59, 130, 246, 0.85);
-  color: #fff;
+.quick-effort-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(127, 127, 127, 0.28);
+}
+.quick-effort-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: #fff;
+  border: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+.quick-effort-slider:focus { outline: none; }
+.quick-effort-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 2px var(--accent), 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+/* 刻度要和滑块把手对齐：把手中心能到的范围是 [7px, 宽度-7px]（半个把手），
+   所以这里左右各让出 7px；每个刻度做成零宽 + 文字居中溢出，文字中心就正好
+   落在对应档位的把手位置上（均匀分布 → 和 space-between 一致）。 */
+.quick-effort-ticks {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 7px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-muted);
+}
+.quick-effort-ticks span {
+  width: 0;
+  min-width: 0;
+  text-align: center;
+  white-space: nowrap;
+  overflow: visible;
 }
 
 /* ===== 附件小标签行（24px，只在挂了文件时占位） =====
@@ -309,7 +472,7 @@ body.session-list-open .quick-session-list { height: 250px; }
   cursor: pointer;
 }
 .quick-attach-remove:hover { background: rgba(127, 127, 127, 0.24); color: var(--text); }
-.quick-attach-remove:focus-visible { outline: 2px solid rgba(59, 130, 246, 0.6); outline-offset: 1px; }
+.quick-attach-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ===== 输入行（第 2 行，32px：输入框） ===== */
 .quick-input-row {
@@ -326,14 +489,15 @@ body.session-list-open .quick-session-list { height: 250px; }
   min-width: 0;
   height: 28px;
   border: 1px solid var(--hud-border);
-  border-radius: 6px;
-  background: transparent;
+  border-radius: 7px;
+  background: var(--hud-bg-strong);
   color: var(--text);
   font-size: 12px;
   font-family: inherit;
   padding: 0 8px;
   outline: none;
   user-select: text;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
 }
 
 .quick-input::placeholder {
@@ -341,12 +505,15 @@ body.session-list-open .quick-session-list { height: 250px; }
   opacity: 0.85;
 }
 
+/* 聚焦用一圈柔光而不是生硬的变色边框，更像 macOS 原生输入框。 */
 .quick-input:focus {
-  border-color: rgba(59, 130, 246, 0.55);
-  background: rgba(59, 130, 246, 0.08);
+  border-color: var(--accent);
+  background: var(--hud-bg);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-/* 「📎 添加文件…」：把文件路径填进输入框（面板只往终端里送文字） */
+/* 输入框左边的「＋ 添加文件」：选中的文件变成上面那行小标签，路径不进输入框。
+   和右边的齿轮同款方块（26×26、圆角 6px），两个图标把输入框夹在中间。 */
 .quick-attach-btn {
   flex: 0 0 26px;
   height: 26px;
@@ -356,12 +523,16 @@ body.session-list-open .quick-session-list { height: 250px; }
   background: transparent;
   color: var(--text-muted);
   font: inherit;
-  font-size: 13px;
+  font-size: 17px;
+  font-weight: 400;
   line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
 }
 .quick-attach-btn:hover { background: rgba(127, 127, 127, 0.18); }
-.quick-attach-btn:focus-visible { outline: 2px solid rgba(59, 130, 246, 0.6); outline-offset: 1px; }
+.quick-attach-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* 键盘 Tab 导航时的焦点圈由各控件自己的 :focus-visible 提供，
    鼠标点击不显示系统默认的焦点环（macOS 上那圈黄边）。 */

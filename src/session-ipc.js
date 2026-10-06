@@ -277,11 +277,15 @@ function registerSessionIpc(options = {}) {
     if (!sessionId) return { status: "error", message: "empty session id" };
     return hudAction(event, options.quickSelectSession, [sessionId]);
   });
-  // 会话列表展开/收起：只影响卡片高度与自动收起（hold），无副作用能力。
-  handle("session-hud:set-list-open", (event, payload) => {
+  // 开/关哪个菜单（点状态行 = 会话菜单，点齿轮 = 设置菜单）：只影响卡片高度与
+  // 自动收起（hold），无副作用能力。menu 只认 null / "session" / "settings"。
+  handle("session-hud:set-menu-open", (event, payload) => {
     const rejected = rejectUntrustedHudEvent(event);
     if (rejected) return rejected;
-    return hudAction(event, options.quickSetListOpen, [payload && payload.open === true]);
+    const menu = payload && (payload.menu === "session" || payload.menu === "settings")
+      ? payload.menu
+      : null;
+    return hudAction(event, options.quickSetMenuOpen, [menu]);
   });
   // 排一个「新会话」占位（真正的终端要等第一句话发出去才开）。
   handle("session-hud:new-session", (event) => {

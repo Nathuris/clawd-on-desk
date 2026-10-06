@@ -169,18 +169,36 @@ describe("快捷面板整卡（视觉外壳）", () => {
     assert.match(sessionHudHtml, /\.quick-card \{ height: 66px; \}/);
   });
 
-  it("卡片贴底排列（窗口变高时只往上长）", () => {
-    assert.match(sessionHudHtml, /#hud \{[\s\S]*align-items:\s*flex-end;[\s\S]*\}/);
+  it("两张卡片贴底叠放（窗口变高时只往上长）", () => {
+    // 主卡片在下、菜单卡片在上，整列贴底：窗口变高时主卡片底边钉住不动。
+    assert.match(sessionHudHtml, /#hud \{[\s\S]*flex-direction:\s*column;[\s\S]*\}/);
+    assert.match(sessionHudHtml, /#hud \{[\s\S]*justify-content:\s*flex-end;[\s\S]*\}/);
     assert.match(sessionHudHtml, /#hud \{[\s\S]*height:\s*100%;[\s\S]*\}/);
     assert.match(sessionHudHtml, /\.quick-card \{[\s\S]*overflow:\s*hidden;[\s\S]*\}/);
     // 缩窗不依赖任何计时：渲染端只负责 CSS，主进程等窗口隐藏后才缩
     assert.doesNotMatch(sessionHudJs, /PANEL_RESIZE|panelResizeTimer/);
   });
 
-  it("卡片外观：圆角、底偏阴影、主题变量", () => {
-    assert.match(sessionHudHtml, /\.quick-card \{[\s\S]*border-radius:\s*8px;[\s\S]*\}/);
+  it("菜单是独立的卡片，开着才淡入（主卡片高度不变）", () => {
+    assert.match(sessionHudHtml, /\.quick-menu-card \{[\s\S]*display:\s*none;[\s\S]*\}/);
+    assert.match(sessionHudHtml, /\.quick-menu-card \{[\s\S]*opacity:\s*1;[\s\S]*transition:[\s\S]*opacity[\s\S]*\}/);
+    assert.match(sessionHudHtml, /body\.session-menu-open \.quick-menu-card,[\s\S]*body\.settings-menu-open \.quick-menu-card \{ display:\s*flex; \}/);
+    // 淡入首帧：透明 + 稍微靠下
+    assert.match(sessionHudHtml, /@starting-style \{[\s\S]*opacity:\s*0;[\s\S]*translateY\(6px\);[\s\S]*\}/);
+    // 主卡片不会再因为开菜单而变高：这两条规则不该再存在
+    assert.doesNotMatch(sessionHudHtml, /body\.session-menu-open \.quick-card \{ height/);
+    assert.doesNotMatch(sessionHudHtml, /body\.settings-menu-open \.quick-card \{ height/);
+    // 渲染端把菜单挂在独立卡片里
+    assert.match(sessionHudRenderer, /menuCardEl\.className = "quick-menu-card"/);
+    assert.match(sessionHudRenderer, /menuCardEl\.appendChild\(createSessionList\(\)\)/);
+  });
+
+  it("卡片外观：圆角、毛玻璃底、内高光阴影、主题变量", () => {
+    assert.match(sessionHudHtml, /\.quick-card \{[\s\S]*border-radius:\s*14px;[\s\S]*\}/);
     assert.match(sessionHudHtml, /\.quick-card \{[\s\S]*background:\s*var\(--hud-bg\);[\s\S]*\}/);
-    assert.match(sessionHudHtml, /\.quick-card \{[\s\S]*box-shadow:\s*0 8px 18px -12px var\(--shadow\),[\s\S]*\}/);
+    // 毛玻璃：半透明底 + backdrop 模糊，内高光（inset）给玻璃一条亮边。
+    assert.match(sessionHudHtml, /\.quick-card \{[\s\S]*backdrop-filter:\s*blur\(24px\) saturate\(180%\);[\s\S]*\}/);
+    assert.match(sessionHudHtml, /\.quick-card \{[\s\S]*box-shadow:[\s\S]*var\(--card-highlight\) inset,[\s\S]*\}/);
     assert.match(sessionHudHtml, /\.quick-card \{[\s\S]*border:\s*1px solid var\(--hud-border\);[\s\S]*\}/);
   });
 
@@ -234,10 +252,11 @@ describe("快捷面板整卡（视觉外壳）", () => {
     assert.doesNotMatch(sessionHudHtml, /block-input|block-settings/);
   });
 
-  it("输入框不出现系统焦点环，用自定义蓝色边框", () => {
-    // 输入框自己 outline:none（去掉 macOS 那圈黄边），聚焦时用蓝色边框示意
+  it("输入框不出现系统焦点环，聚焦时用一圈柔光", () => {
+    // 输入框自己 outline:none（去掉 macOS 那圈黄边），聚焦用主题蓝 + 柔光
     assert.match(sessionHudHtml, /\.quick-input \{[\s\S]*outline:\s*none;[\s\S]*\}/);
-    assert.match(sessionHudHtml, /\.quick-input:focus \{[\s\S]*border-color:\s*rgba\(59, 130, 246, 0\.55\);/);
+    assert.match(sessionHudHtml, /\.quick-input:focus \{[\s\S]*border-color:\s*var\(--accent\);[\s\S]*\}/);
+    assert.match(sessionHudHtml, /\.quick-input:focus \{[\s\S]*box-shadow:\s*0 0 0 3px var\(--accent-soft\);[\s\S]*\}/);
     assert.doesNotMatch(sessionHudHtml, /quick-level-btn|quick-stop-btn|quick-effort-range/);
   });
 
@@ -344,41 +363,69 @@ describe("面板窗口尺寸：主进程常量与 CSS 一致", () => {
     assert.strictEqual(6 + 16 + 4 + 32 + 6 + 2, hudTest.QUICK_CARD.height);
   });
 
-  it("展开态：列表区行数与卡片高度两侧一致", () => {
-    assert.deepStrictEqual(hudTest.QUICK_CARD_EXPANDED, { width: 300, height: 320 });
-    assert.match(sessionHudHtml, /body\.session-list-open \.quick-card \{ height: 320px; \}/);
-    assert.match(sessionHudHtml, /body\.session-list-open \.quick-session-list \{ height: 250px; \}/);
+  it("菜单卡片的列表区与卡片高度两侧一致", () => {
+    assert.deepStrictEqual(hudTest.QUICK_MENU_CARD, { width: 300, session: 192, settings: 242 });
+    assert.strictEqual(hudTest.QUICK_MENU_GAP, 6);
+    assert.match(sessionHudHtml, /body\.session-menu-open \.quick-menu-card \{ height: 192px; \}/);
+    assert.match(sessionHudHtml, /body\.settings-menu-open \.quick-menu-card \{ height: 242px; \}/);
+    assert.match(sessionHudHtml, /body\.session-menu-open \.quick-session-list \{ height: 178px; \}/);
+    assert.match(sessionHudHtml, /body\.settings-menu-open \.quick-session-list \{ height: 228px; \}/);
     assert.match(sessionHudHtml, /\.quick-session-item \{[\s\S]*?height: 28px;[\s\S]*?\}/);
-    assert.match(sessionHudHtml, /\.quick-setting-row \{[\s\S]*?height: 34px;[\s\S]*?\}/);
-    // 列表区：最多 4 条会话（4×28）+ 新建入口（28）+ 权限开关（34）+ 强度开关（34）
-    // + 选文件夹入口（28）+ 行距 7×2 = 250，再加一个卡片行距 4 = 320。
-    assert.strictEqual(
-      4 * 28 + 28 + 34 + 34 + 28 + 7 * 2 + 4,
-      hudTest.QUICK_CARD_EXPANDED.height - hudTest.QUICK_CARD.height
-    );
-    assert.strictEqual(hudTest.QUICK_CARD.height + 250 + 4, hudTest.QUICK_CARD_EXPANDED.height);
+    assert.match(sessionHudHtml, /\.quick-permission-item \{[\s\S]*?height: 44px;[\s\S]*?\}/);
+    assert.match(sessionHudHtml, /\.quick-effort-block \{[\s\S]*?height: 44px;[\s\S]*?\}/);
+    // 卡片本体 = 列表区 + 上下内边距 12 + 边框 2
+    assert.strictEqual(178 + 6 + 6 + 2, hudTest.QUICK_MENU_CARD.session);
+    assert.strictEqual(228 + 6 + 6 + 2, hudTest.QUICK_MENU_CARD.settings);
+    assert.match(sessionHudHtml, /#hud \{[\s\S]*gap:\s*6px;[\s\S]*\}/);
   });
 
   it("挂了附件时多出来的一行，两侧数字也一致", () => {
-    // 标签行 24 + 卡片自己的一个行距 4 = 28；收起 66+28=94，展开 320+28=348
+    // 标签行 24 + 卡片自己的一个行距 4 = 28；主卡片 66 + 28 = 94
     assert.strictEqual(hudTest.QUICK_ATTACH_ROW.height, 24);
     assert.strictEqual(hudTest.QUICK_ATTACH_EXTRA, 24 + 4);
     assert.match(sessionHudHtml, /\.quick-attach-row \{[\s\S]*?height:\s*24px;[\s\S]*?\}/);
     assert.match(sessionHudHtml, /body\.has-attachments \.quick-card \{ height: 94px; \}/);
-    assert.match(
-      sessionHudHtml,
-      /body\.session-list-open\.has-attachments \.quick-card \{ height: 348px; \}/
-    );
-    // 顺序要紧：带 attach 的两条必须排在前面两条之后，同特异性时后者胜
-    const plain = sessionHudHtml.indexOf(".quick-card { height: 66px; }");
-    const opened = sessionHudHtml.indexOf("body.session-list-open .quick-card { height: 320px; }");
-    const attached = sessionHudHtml.indexOf("body.has-attachments .quick-card { height: 94px; }");
-    const both = sessionHudHtml.indexOf(
-      "body.session-list-open.has-attachments .quick-card { height: 348px; }"
-    );
-    assert.ok(plain < attached && opened < attached && attached < both, "CSS 覆盖顺序不对");
     assert.strictEqual(hudTest.QUICK_CARD.height + hudTest.QUICK_ATTACH_EXTRA, 94);
-    assert.strictEqual(hudTest.QUICK_CARD_EXPANDED.height + hudTest.QUICK_ATTACH_EXTRA, 348);
+  });
+
+  it("强度刻度与滑块把手对齐（左右让出半个把手的宽度）", () => {
+    // 把手 14px → 半个 7px：刻度行左右各 7px，每个刻度零宽 + 文字居中溢出，
+    // 文字中心才正好落在把手能到的那 5 个位置上。
+    assert.match(sessionHudHtml, /\.quick-effort-slider::-webkit-slider-thumb \{[\s\S]*?width:\s*14px;[\s\S]*?\}/);
+    assert.match(sessionHudHtml, /\.quick-effort-ticks \{[\s\S]*?padding:\s*0 7px;[\s\S]*?\}/);
+    assert.match(sessionHudHtml, /\.quick-effort-ticks span \{[\s\S]*?width:\s*0;[\s\S]*?text-align:\s*center;[\s\S]*?\}/);
+  });
+
+  it("齿轮和「＋」是同款方块，都只画图标不写字", () => {
+    // 同一套尺寸：26×26、圆角 6px、图标居中。
+    for (const sel of ["quick-settings-btn", "quick-attach-btn"]) {
+      assert.match(sessionHudHtml, new RegExp(`\\.${sel} \\{[\\s\\S]*?flex:\\s*0 0 26px;[\\s\\S]*?height:\\s*26px;[\\s\\S]*?\\}`));
+      assert.match(sessionHudHtml, new RegExp(`\\.${sel} \\{[\\s\\S]*?border-radius:\\s*6px;[\\s\\S]*?\\}`));
+      assert.match(sessionHudHtml, new RegExp(`\\.${sel} \\{[\\s\\S]*?justify-content:\\s*center;[\\s\\S]*?\\}`));
+    }
+    assert.match(sessionHudHtml, /\.quick-settings-icon \{[\s\S]*?\}/);
+    // 两个按钮里都只有图标，没有文字（这一行的宽度留给输入框）
+    assert.doesNotMatch(sessionHudRenderer, /quick-settings-text/);
+    assert.doesNotMatch(sessionHudHtml, /quick-settings-text/);
+    assert.match(sessionHudRenderer, /attachBtn\.textContent = "\+";/);
+    assert.doesNotMatch(sessionHudRenderer, /attachBtn\.textContent = "📎"/);
+  });
+
+  it("「＋」在输入框左边、齿轮在右边（都不在状态行上）", () => {
+    const inputRow = sessionHudRenderer.slice(sessionHudRenderer.indexOf("function createInputRow()"));
+    // 按「装进这一行」的先后顺序看（而不是按创建顺序——输入框是最后 append 的）
+    const attachIdx = inputRow.indexOf("inputRow.appendChild(attachBtn)");
+    const inputIdx = inputRow.indexOf("inputRow.appendChild(promptInputEl)");
+    const gearIdx = inputRow.indexOf("inputRow.appendChild(settingsBtnEl)");
+    assert.ok(attachIdx > 0 && inputIdx > 0 && gearIdx > 0, "都在 createInputRow 里");
+    assert.ok(attachIdx < inputIdx, "「＋」排在输入框前面（左侧）");
+    assert.ok(gearIdx > inputIdx, "齿轮排在输入框后面（右侧）");
+    // 状态行只剩「目标会话」这一个可点区域
+    const statusRow = sessionHudRenderer.slice(
+      sessionHudRenderer.indexOf("function createStatusRow()"),
+      sessionHudRenderer.indexOf("function createInputRow()")
+    );
+    assert.doesNotMatch(statusRow, /quick-settings-btn/);
   });
 
   it("卡片下方 30px 壳内不放任何节点（输入法净空）", () => {

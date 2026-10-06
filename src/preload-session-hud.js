@@ -24,7 +24,7 @@ contextBridge.exposeInMainWorld("sessionHudAPI", {
   sendPrompt: (text) => ipcRenderer.invoke("session-hud:send-prompt", { text }),
   // 手选目标会话 / 展开会话列表 / 在终端里新建会话
   selectSession: (sessionId) => ipcRenderer.invoke("session-hud:select-session", { sessionId }),
-  setListOpen: (open) => ipcRenderer.invoke("session-hud:set-list-open", { open: !!open }),
+  setMenuOpen: (menu) => ipcRenderer.invoke("session-hud:set-menu-open", { menu }),
   newSession: () => ipcRenderer.invoke("session-hud:new-session"),
   // 取消排好的新会话占位。
   cancelPendingSession: () => ipcRenderer.invoke("session-hud:cancel-pending-session"),

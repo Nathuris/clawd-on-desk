@@ -31,23 +31,32 @@ const isWin = process.platform === "win32";
 // 卡片默认两行：状态行（16）+ 行距（4）+ 输入行（32），
 // 6 + 16 + 4 + 32 + 6 + 2 = 66。
 const QUICK_CARD = Object.freeze({ width: 300, height: 66 });
-// 点状态行展开会话列表，列表区从上到下：最多 4 条会话（各 28）＋ 新建会话（28）
-// ＋ 权限模式（34）＋ 思考强度（34）＋ 选文件夹（28），行距一律 2：
-// 4×28 + 28 + 34 + 34 + 28 + 7×2 = 250，再加一个卡片行距 4 → 66 + 250 + 4 = 320。
-const QUICK_CARD_EXPANDED = Object.freeze({ width: 300, height: 320 });
-// 挂了附件时多出来的一行小标签：行高 24 + 卡片自己的一个行距 4 = 28。
-// 这一行插在会话列表和输入行之间，所以多出来的高度全往上长，输入框不动。
+// 菜单是主卡片**上面另起一张卡片**（开着才出现），主卡片自己的高度一点不变。
+// 点状态行开「会话」菜单（会话 + 新建 + 选文件夹），点右侧齿轮开「设置」菜单
+// （权限 + 强度）；互斥，一次只开一个。
+//
+// 菜单卡片本体 = 列表区 + 上下内边距 12 + 边框 2：
+//   会话：列表区 178（4 条会话 4×28 ＋ 新建 28 ＋ 选文件夹 28 ＋ 行距 5×2）→ 192
+//   设置：列表区 228（4 个权限项 4×44 ＋ 强度块 44 ＋ 行距 4×2）→ 242
+const QUICK_MENU_CARD = Object.freeze({ width: 300, session: 192, settings: 242 });
+// 两张卡片之间的间距（#hud 的 gap）。
+const QUICK_MENU_GAP = 6;
+// 挂了附件时主卡片多出来的一行小标签：行高 24 + 卡片自己的一个行距 4 = 28。
 const QUICK_ATTACH_ROW = Object.freeze({ height: 24 });
 const QUICK_ATTACH_EXTRA = QUICK_ATTACH_ROW.height + 4;
-// 卡片该多高：展开列表 +254、挂附件 +28，两者可叠加（数字必须和 session-hud.html
-// 的 .quick-card / .quick-attach-row 一一对应）。
-function quickCardHeight(listOpen, hasAttachments) {
-  const base = listOpen ? QUICK_CARD_EXPANDED.height : QUICK_CARD.height;
-  return base + (hasAttachments ? QUICK_ATTACH_EXTRA : 0);
+// 窗口内容该多高：主卡片（挂了附件 +28）＋（开菜单时）间距 + 菜单卡片。
+// 数字必须和 session-hud.html 的 .quick-card / .quick-menu-card / #hud gap 一一对应。
+function quickCardHeight(menu, hasAttachments) {
+  const main = QUICK_CARD.height + (hasAttachments ? QUICK_ATTACH_EXTRA : 0);
+  const menuCard = menu === "session" || menu === "settings" ? QUICK_MENU_CARD[menu] : 0;
+  return menuCard ? main + QUICK_MENU_GAP + menuCard : main;
 }
 // 底部 60px 是输入法候选窗的净空：太小的话 macOS 会认为「光标下面放不下」，
 // 把候选窗翻到输入框上方，结果被卡片盖住。
 const QUICK_SHELL = Object.freeze({ top: 2, right: 3, bottom: 60, left: 3 });
+// 面板整体比桌宠中心再往下挪一点：卡片默认垂直居中于桌宠，看着偏上，
+// 往下压几像素跟桌宠的视觉重心更贴。收起态和展开态一起挪（底边跟着走）。
+const QUICK_DROP = 12;
 const BLOCK_PET_GAP = 6;
 const BLOCK_WIDTH_GROWTH_RATIO = 0.4;
 const EDGE_MARGIN = 8;
@@ -188,6 +197,7 @@ function computeBlockBounds({
   scale = 1,
   widthScale = scale,
   baseCardH,
+  dropY = 0,
 }) {
   const followRect = isScreenRect(anchorRect) ? anchorRect : hitRect;
   if (!isScreenRect(followRect) || !workArea) return null;
@@ -204,19 +214,26 @@ function computeBlockBounds({
   };
   const gap = Math.round(BLOCK_PET_GAP * s);
   const edge = Math.round(EDGE_MARGIN * s);
+  const drop = Math.round(dropY * s);
 
   const minX = Math.round(workArea.x + edge);
   const maxX = Math.round(workArea.x + workArea.width - edge - dipWidth);
-  const minY = Math.round(workArea.y + edge);
-  const maxY = Math.round(workArea.y + workArea.height - edge - dipHeight);
+  // 竖直方向要按**整扇窗口**算，不只是看得见的卡片：窗口比卡片高出一圈壳
+  // （上 top、下 bottom，底部那 60px 是输入法净空）。桌宠靠屏幕下沿时，只按
+  // 卡片算会让窗口底边越出屏幕，macOS 出手把窗口顶回屏幕内 → 面板先出现在
+  // 偏上的位置、下一次刷新又被挪回来，看起来就是"先在上面出现再往下蹦一下"，
+  // 而且热区判定和眼睛看到的卡片错位，鼠标往下移开时面板还以为在卡片里、
+  // 不肯收起。所以这里连壳一起夹进工作区。
+  const minY = Math.round(workArea.y + edge + sh.top);
+  const maxY = Math.round(workArea.y + workArea.height - edge - dipHeight - sh.bottom);
   const followCy = Math.round((followRect.top + followRect.bottom) / 2);
 
-  // 底边基准：收起高度垂直居中时的底边。展开态保持这条底边不动，
-  // 于是多出来的高度全部长在上方（不会向下顶到桌宠那边）。
+  // 底边基准：收起高度垂直居中时的底边，再统一往下挪 drop。展开态保持这条
+  // 底边不动，于是多出来的高度全部长在上方（不会向下顶到桌宠那边）。
   const baseHeight = Math.ceil((Number.isFinite(baseCardH) ? baseCardH : cardH) * s);
-  const baseMinY = Math.round(workArea.y + edge);
-  const baseMaxY = Math.round(workArea.y + workArea.height - edge - baseHeight);
-  const baseY = clampToWorkArea(followCy - Math.round(baseHeight / 2), baseMinY, baseMaxY);
+  const baseMinY = Math.round(workArea.y + edge + sh.top);
+  const baseMaxY = Math.round(workArea.y + workArea.height - edge - baseHeight - sh.bottom);
+  const baseY = clampToWorkArea(followCy - Math.round(baseHeight / 2) + drop, baseMinY, baseMaxY);
   const y = clampToWorkArea(baseY + baseHeight - dipHeight, minY, maxY);
 
   const sideX = (side) => (side === "left"
@@ -244,7 +261,7 @@ function computeBlockBounds({
       minX,
       maxX
     );
-    const belowY = clampToWorkArea(followRect.bottom + gap, minY, maxY);
+    const belowY = clampToWorkArea(followRect.bottom + gap + drop, minY, maxY);
     contentBounds = { x, y: belowY, width: dipWidth, height: dipHeight };
   } else {
     contentBounds = { x, y, width: dipWidth, height: dipHeight };
@@ -292,6 +309,7 @@ module.exports = function initSessionHud(ctx) {
   let ringSide = "left";
 
   let pollTimer = null;
+
   // 点击揭示状态机：单击桌宠 → revealFromPet() 置 revealed；
   // 轮询盯「指针离开热区 + 宽限期」自动收起。
   // holdReasons=渲染端报告的「不能收」原因（输入框聚焦/有草稿）。
@@ -300,7 +318,8 @@ module.exports = function initSessionHud(ctx) {
   let visibleHoldUntil = 0;
   // 会话列表是否展开：展开时卡片更高，且 holdReasons 里钉一个 "menu"
   // 让面板不被自动收起（用户正在挑会话）。
-  let sessionListOpen = false;
+  // 开的是哪个菜单：null 收起、"session" 会话菜单、"settings" 设置菜单（互斥）。
+  let menuOpen = null;
   // 输入框上挂了几个附件（渲染端持有附件本身，只把这个数字报上来）。
   // 它决定卡片要不要多出一行标签，所以窗口几何这边必须知道。
   let attachmentCount = 0;  // 快捷面板的状态投影（effort/权限/忙碌/排队数…），主进程推来后转发面板窗口。
@@ -469,10 +488,11 @@ module.exports = function initSessionHud(ctx) {
     const panelLayout = computeBlockBounds({
       hitRect, anchorRect, workArea,
       cardW: QUICK_CARD.width,
-      cardH: quickCardHeight(sessionListOpen, attachmentCount > 0),
+      cardH: quickCardHeight(menuOpen, attachmentCount > 0),
       // 展开态以收起态的底边为基准向上长（只向上延伸，不向下撑）
       baseCardH: QUICK_CARD.height,
       shell: QUICK_SHELL, prefer: "left", scale, widthScale,
+      dropY: QUICK_DROP,
     });
 
     const coinCount = countQuotaCoins(latestSnapshot, ctx.sessionHudShowQuota !== false, ctx.quotaRingHiddenProviders);
@@ -1063,10 +1083,10 @@ module.exports = function initSessionHud(ctx) {
   }
 
   function hidePanel() {
-    // 面板一收，会话列表必须跟着复位：下次点桌宠应是收起态。否则窗口按
+    // 面板一收，菜单必须跟着复位：下次点桌宠应是收起态。否则窗口按
     // 收起高度算、渲染端还画着展开卡片，内容会被裁掉。
-    if (sessionListOpen) {
-      sessionListOpen = false;
+    if (menuOpen) {
+      menuOpen = null;
       holdReasons.delete("menu");
       if (typeof ctx.onQuickStateChanged === "function") ctx.onQuickStateChanged();
     }
@@ -1101,20 +1121,21 @@ module.exports = function initSessionHud(ctx) {
     if (typeof ctx.onReservedOffsetChange === "function") ctx.onReservedOffsetChange();
   }
 
-  // 会话列表展开/收起：主进程是唯一状态源（渲染端只投影），因为窗口高度要
-  // 跟着变——渲染端自己做状态会跟窗口尺寸脱节。
-  function setSessionListOpen(open) {
-    const next = open === true;
-    if (next === sessionListOpen) return;
-    sessionListOpen = next;
+  // 开/关菜单：主进程是唯一状态源（渲染端只投影），因为窗口高度要跟着变——
+  // 渲染端自己做状态会跟窗口尺寸脱节。menu ∈ null / "session" / "settings"，
+  // 两个菜单互斥，开一个自动关另一个。
+  function setMenuOpen(menu) {
+    const next = menu === "session" || menu === "settings" ? menu : null;
+    if (next === menuOpen) return;
+    menuOpen = next;
     if (next) holdReasons.add("menu");
     else holdReasons.delete("menu");
     syncSessionHud(latestSnapshot || getCurrentSnapshot(), {});
     if (typeof ctx.onQuickStateChanged === "function") ctx.onQuickStateChanged();
   }
 
-  function isSessionListOpen() {
-    return sessionListOpen;
+  function getMenuOpen() {
+    return menuOpen;
   }
 
   // 输入框上挂了几个附件（渲染端持有附件本身，只把这个数字报上来）。
@@ -1240,7 +1261,7 @@ module.exports = function initSessionHud(ctx) {
     cancelPanelFade();
     pendingHiddenBounds = null;
     clickThrough = null;
-    sessionListOpen = false;
+    menuOpen = null;
     attachmentCount = 0;
     holdReasons.delete("menu");
     const win = panel.win;
@@ -1261,8 +1282,8 @@ module.exports = function initSessionHud(ctx) {
     getHudReservedOffset,
     getBlockRects,
     getPanelCardRect,
-    setSessionListOpen,
-    isSessionListOpen,
+    setMenuOpen,
+    getMenuOpen,
     setAttachments,
     getAttachmentCount,
     cleanup,
@@ -1288,11 +1309,13 @@ module.exports = function initSessionHud(ctx) {
 
 module.exports.__test = {
   QUICK_CARD,
-  QUICK_CARD_EXPANDED,
+  QUICK_MENU_CARD,
+  QUICK_MENU_GAP,
   QUICK_ATTACH_ROW,
   QUICK_ATTACH_EXTRA,
   quickCardHeight,
   QUICK_SHELL,
+  QUICK_DROP,
   computeBlockBounds,
   evaluateBaseEligible,
   evaluateShouldShow,

@@ -31,6 +31,11 @@ let quickFeedbackIsError = false;
 
 // 常驻节点：面板只建一次，之后只改内容
 let statusTextEl = null;
+let statusDotEl = null;
+let settingsBtnEl = null;
+// 设置菜单里那几个控件的引用：状态一变就地打补丁，不重建 DOM——滑块拖到一半
+// 被重建的话，指针下面的把手就没了，拖一下就断。
+let settingsMenuEls = null;
 let targetBtnEl = null;
 let sessionListEl = null;
 let promptInputEl = null;
@@ -44,6 +49,8 @@ const MAX_ATTACHMENTS = 4;
 let attachments = [];
 // 卡片节点 + 上一次上报的穿透状态：指针进出卡片时通知主进程切换
 let cardEl = null;
+// 菜单卡片（主卡片上面那张，开着才显示）
+let menuCardEl = null;
 let lastClickThrough = null;
 
 function t(key) {
@@ -85,7 +92,7 @@ function normalizeQuickState(raw) {
     pendingId: typeof s.pendingId === "string" && s.pendingId ? s.pendingId : null,
     pendingLaunched: s.pendingLaunched === true,
     targetPending: s.targetPending === true,
-    listOpen: s.listOpen === true,
+    menuOpen: s.menuOpen === "session" || s.menuOpen === "settings" ? s.menuOpen : null,
   };
 }
 
@@ -114,6 +121,23 @@ function quickStatusText() {
   return state ? `${line} · ${state}` : line;
 }
 
+// 状态圆点：绿=在跑、灰=空闲、蓝=新会话在启动；临时提示时退回灰，别抢注意力。
+function updateStatusDot() {
+  if (!statusDotEl) return;
+  let mode = "idle";
+  if (!quickFeedback) {
+    if (quickState.targetPending) mode = "pending";
+    else if (quickState.targetState
+      && quickState.targetState !== "idle"
+      && quickState.targetState !== "sleeping") mode = "working";
+  }
+  for (const cls of ["is-working", "is-pending"]) {
+    if (statusDotEl.classList.contains(cls) !== (mode === cls.slice(3))) {
+      statusDotEl.classList.toggle(cls, mode === cls.slice(3));
+    }
+  }
+}
+
 // 状态行只在内容/样式真的变了才动，避免无谓重排
 function updateStatusRow() {
   if (!statusTextEl || !i18nReady) return;
@@ -122,25 +146,45 @@ function updateStatusRow() {
   if (statusTextEl.classList.contains("is-error") !== quickFeedbackIsError) {
     statusTextEl.classList.toggle("is-error", quickFeedbackIsError);
   }
-  if (document.body) document.body.classList.toggle("session-list-open", quickState.listOpen);
+  updateStatusDot();
+  if (document.body) {
+    document.body.classList.toggle("session-menu-open", quickState.menuOpen === "session");
+    document.body.classList.toggle("settings-menu-open", quickState.menuOpen === "settings");
+  }
   if (targetBtnEl) {
     const label = t("hudQuickTargetLabel");
     if (targetBtnEl.getAttribute("aria-label") !== label) {
       targetBtnEl.setAttribute("aria-label", label);
       targetBtnEl.title = label;
     }
-    targetBtnEl.setAttribute("aria-expanded", quickState.listOpen ? "true" : "false");
+    targetBtnEl.setAttribute("aria-expanded", quickState.menuOpen === "session" ? "true" : "false");
+  }
+  if (settingsBtnEl) {
+    const label = t("hudQuickSettingsLabel");
+    if (settingsBtnEl.getAttribute("aria-label") !== label) {
+      settingsBtnEl.setAttribute("aria-label", label);
+      settingsBtnEl.title = label;
+    }
+    settingsBtnEl.classList.toggle("is-open", quickState.menuOpen === "settings");
+    settingsBtnEl.setAttribute("aria-expanded", quickState.menuOpen === "settings" ? "true" : "false");
   }
 }
 
-// 会话列表只在展开时重建（收起时不碰 DOM，省掉无谓重排）
-function updateSessionList() {
+// 菜单只在展开时重建（收起时不碰 DOM，省掉无谓重排）。
+// 设置菜单已经画着的时候不重建，只打补丁——滑块拖到一半重建会把它从指针底下抽走。
+function updateMenu() {
   if (!sessionListEl) return;
-  if (!quickState.listOpen) {
+  if (!quickState.menuOpen) {
+    settingsMenuEls = null;
     if (sessionListEl.children.length) sessionListEl.replaceChildren();
     return;
   }
-  renderSessionList();
+  if (quickState.menuOpen === "settings" && settingsMenuEls) {
+    patchSettingsMenu();
+    return;
+  }
+  settingsMenuEls = null;
+  renderMenu();
 }
 
 function showQuickFeedback(message, isError = false) {
@@ -159,35 +203,39 @@ function showQuickFeedback(message, isError = false) {
 function createStatusRow() {
   const statusRow = document.createElement("div");
   statusRow.className = "quick-status-row";
-  statusTextEl = document.createElement("span");
-  statusTextEl.className = "quick-status-text";
   targetBtnEl = document.createElement("button");
   targetBtnEl.type = "button";
   targetBtnEl.className = "quick-target-btn";
+  // 状态圆点在文字前面：绿=在跑、灰=空闲、蓝=新会话在启动。
+  statusDotEl = document.createElement("span");
+  statusDotEl.className = "quick-status-dot";
+  targetBtnEl.appendChild(statusDotEl);
+  statusTextEl = document.createElement("span");
+  statusTextEl.className = "quick-status-text";
   targetBtnEl.appendChild(statusTextEl);
   const caret = document.createElement("span");
   caret.className = "quick-target-caret";
   caret.textContent = "⌄";
   targetBtnEl.appendChild(caret);
-  targetBtnEl.addEventListener("click", handleToggleList);
+  targetBtnEl.addEventListener("click", () => handleToggleMenu("session"));
   statusRow.appendChild(targetBtnEl);
+
   return statusRow;
 }
 
-// 会话列表：每条一行（名称 + 文件夹/状态），然后是新建会话的两个开关、新建入口，
-// 最后一行是选文件夹。行数由主进程给的列表决定；渲染端最多画 SESSION_ROW_LIMIT
-// 条会话，加上四个固定行正好把列表区填满（卡片高度是写死的一组数字）。
+// 两个菜单共用这个容器：点状态行开会话菜单，点齿轮开设置菜单。渲染端最多画
+// SESSION_ROW_LIMIT 条会话；菜单高度是写死的一组数字，和主进程一一对应。
 const SESSION_ROW_LIMIT = 4;
 
 // 两个开关的可选项。值必须和 src/session-new-options.js 的允许列表一致——
 // 主进程只认那几个值，写错了会被打回默认档。
-const PERMISSION_CHIPS = [
-  { value: "auto", labelKey: "hudQuickPermissionAuto" },
-  { value: "manual", labelKey: "hudQuickPermissionManual" },
-  { value: "acceptEdits", labelKey: "hudQuickPermissionEdits" },
-  { value: "plan", labelKey: "hudQuickPermissionPlan" },
+const PERMISSION_OPTIONS = [
+  { value: "auto", labelKey: "hudQuickPermissionAuto", descKey: "hudQuickPermissionAutoDesc" },
+  { value: "manual", labelKey: "hudQuickPermissionManual", descKey: "hudQuickPermissionManualDesc" },
+  { value: "acceptEdits", labelKey: "hudQuickPermissionEdits", descKey: "hudQuickPermissionEditsDesc" },
+  { value: "plan", labelKey: "hudQuickPermissionPlan", descKey: "hudQuickPermissionPlanDesc" },
 ];
-const EFFORT_CHIPS = [
+const EFFORT_OPTIONS = [
   { value: "low", labelKey: "hudQuickEffortLow" },
   { value: "medium", labelKey: "hudQuickEffortMedium" },
   { value: "high", labelKey: "hudQuickEffortHigh" },
@@ -201,8 +249,39 @@ function createSessionList() {
   return sessionListEl;
 }
 
-function renderSessionList() {
+// 按开的是哪个菜单画对应内容。
+function renderMenu() {
   if (!sessionListEl || !i18nReady) return;
+  if (quickState.menuOpen === "settings") renderSettingsMenu();
+  else renderSessionMenu();
+}
+
+// 状态变了但不是第一次画这个菜单：只改样式与取值，不换节点（见 settingsMenuEls）。
+function patchSettingsMenu() {
+  const els = settingsMenuEls;
+  if (!els) return;
+  for (const [value, item] of els.items) {
+    if (item.classList.contains("is-selected") !== (quickState.permissionMode === value)) {
+      item.classList.toggle("is-selected", quickState.permissionMode === value);
+    }
+  }
+  const index = Math.max(0, EFFORT_OPTIONS.findIndex((item) => item.value === quickState.effort));
+  const next = String(index);
+  if (els.slider.value !== next) els.slider.value = next;
+  const label = chipLabel(EFFORT_OPTIONS, quickState.effort) || "—";
+  if (els.valueEl.textContent !== label) els.valueEl.textContent = label;
+  // 语言换了时，刻度的文字也要跟着换
+  EFFORT_OPTIONS.forEach((option, i) => {
+    const tick = els.ticks[i];
+    if (tick) {
+      const text = t(option.labelKey);
+      if (tick.textContent !== text) tick.textContent = text;
+    }
+  });
+}
+
+// 会话菜单：排好的新会话 + 会话列表 + 新建 + 选文件夹。
+function renderSessionMenu() {
   // 排好的新会话占一行，所以真会话的行数让出一位给它。
   const budget = SESSION_ROW_LIMIT - (quickState.pendingId ? 1 : 0);
   const items = quickState.sessions.slice(0, budget);
@@ -248,11 +327,6 @@ function renderSessionList() {
     createRow.addEventListener("click", handleCreateSession);
     nodes.push(createRow);
 
-    // 两个开关紧跟着「新建会话」：上半截是「发给谁 / 开一个」（选择会话 → 新建
-    // 会话），下半截是这两个开关和最底下最不常用的「选文件夹」。
-    nodes.push(createSettingRow("hudQuickPermissionLabel", PERMISSION_CHIPS, "permissionMode"));
-    nodes.push(createSettingRow("hudQuickEffortLabel", EFFORT_CHIPS, "effort"));
-
     const folderRow = document.createElement("button");
     folderRow.type = "button";
     folderRow.className = "quick-session-item quick-session-folder";
@@ -270,6 +344,93 @@ function renderSessionList() {
     nodes.push(folderRow);
   }
   sessionListEl.replaceChildren(...nodes);
+}
+
+// 设置菜单：权限列表（大字名称 + 小字解释）+ 强度滑块。
+// 建完把关键节点记下来，之后状态变化走 patchSettingsMenu 就地更新。
+function renderSettingsMenu() {
+  const items = new Map();
+  const nodes = PERMISSION_OPTIONS.map((option) => {
+    const item = createPermissionItem(option);
+    items.set(option.value, item);
+    return item;
+  });
+  const effort = createEffortBlock();
+  nodes.push(effort.block);
+  sessionListEl.replaceChildren(...nodes);
+  settingsMenuEls = { items, slider: effort.slider, valueEl: effort.valueEl, ticks: effort.ticks };
+}
+
+// 权限列表项：上方大字模式名，下方小字解释；选中的高亮。
+function createPermissionItem(option) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "quick-permission-item";
+  if (quickState.permissionMode === option.value) item.classList.add("is-selected");
+  item.setAttribute("data-permission", option.value);
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "quick-permission-name";
+  nameEl.textContent = t(option.labelKey);
+  item.appendChild(nameEl);
+
+  const descEl = document.createElement("span");
+  descEl.className = "quick-permission-desc";
+  descEl.textContent = t(option.descKey);
+  item.appendChild(descEl);
+
+  item.addEventListener("click", () => handleSettingPick("permissionMode", option.value));
+  return item;
+}
+
+// 强度块：标签 + 5 档滑块 + 两端刻度；拖动即切换（不重置会话，只是新会话的参数）。
+// 拖动过程中把节点交回去，主进程推状态回来时由 patchSettingsMenu 就地更新，
+// 不重建——所以能一直拖着走，不会滑一下就断。
+function createEffortBlock() {
+  const block = document.createElement("div");
+  block.className = "quick-effort-block";
+
+  const head = document.createElement("div");
+  head.className = "quick-effort-head";
+  const label = document.createElement("span");
+  label.className = "quick-effort-label";
+  label.textContent = t("hudQuickEffortLabel");
+  head.appendChild(label);
+  const valueEl = document.createElement("span");
+  valueEl.className = "quick-effort-value";
+  valueEl.textContent = chipLabel(EFFORT_OPTIONS, quickState.effort) || "—";
+  head.appendChild(valueEl);
+  block.appendChild(head);
+
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.className = "quick-effort-slider";
+  slider.min = "0";
+  slider.max = String(EFFORT_OPTIONS.length - 1);
+  slider.step = "1";
+  const currentIndex = Math.max(0, EFFORT_OPTIONS.findIndex((item) => item.value === quickState.effort));
+  slider.value = String(currentIndex);
+  slider.addEventListener("input", () => {
+    const option = EFFORT_OPTIONS[Number(slider.value)];
+    if (option) {
+      valueEl.textContent = t(option.labelKey);
+      handleSettingPick("effort", option.value);
+    }
+  });
+  block.appendChild(slider);
+
+  const ticks = document.createElement("div");
+  ticks.className = "quick-effort-ticks";
+  const tickEls = [];
+  for (const option of EFFORT_OPTIONS) {
+    const tick = document.createElement("span");
+    tick.textContent = t(option.labelKey);
+    ticks.appendChild(tick);
+    tickEls.push(tick);
+  }
+  block.appendChild(ticks);
+
+  return { block, slider, valueEl, ticks: tickEls };
 }
 
 // 排好的新会话：整行可点（点它 = 发给它），右边的 ✕ 取消。
@@ -310,54 +471,24 @@ function createPendingRow() {
   return row;
 }
 
-// 一行开关：上面一行小标签，下面一排小按钮（单选，当前档高亮）。
-// 标签单独占一行是因为按钮最多有 6 个（默认+五档），和标签挤一行在
-// 西语/葡语那种长单词下会被挤掉。
-function createSettingRow(labelKey, chips, optionKey) {
-  const row = document.createElement("div");
-  row.className = "quick-setting-row";
-  row.setAttribute("data-option", optionKey);
-
-  const label = document.createElement("span");
-  label.className = "quick-setting-label";
-  label.textContent = t(labelKey);
-  row.appendChild(label);
-
-  const chipsEl = document.createElement("div");
-  chipsEl.className = "quick-setting-chips";
-  for (const chip of chips) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "quick-chip";
-    if (chip.danger) button.classList.add("is-danger");
-    button.setAttribute("data-value", chip.value);
-    button.textContent = t(chip.labelKey);
-    if (quickState[optionKey] === chip.value) button.classList.add("is-selected");
-    button.addEventListener("click", () => handleSettingPick(optionKey, chip.value));
-    chipsEl.appendChild(button);
-  }
-  row.appendChild(chipsEl);
-  return row;
-}
-
-// 「新建会话」那一行的第二行小字：位置：<目录名> · 全部允许 · 强度：高。
-// 把当前两个开关也写在这儿——按钮在上面、动作用的是它们，不写出来的话
-// 用户点下去之前没法确认自己开的是哪一档。
+// 「新建会话」那一行的第二行小字：位置：<目录名> · 权限档 · 强度：<档>。
+// 把当前两个开关也写在这儿——它们在设置菜单里改，不写出来的话用户点下去之前
+// 没法确认自己开的是哪一档。
 function sessionFolderLabel() {
   const name = quickState.newSessionFolderName || quickState.newSessionFolder;
   const parts = [];
   if (name) parts.push(t("hudQuickNewSessionAt").replace("{path}", name));
-  const permission = chipLabel(PERMISSION_CHIPS, quickState.permissionMode);
+  const permission = chipLabel(PERMISSION_OPTIONS, quickState.permissionMode);
   if (permission) parts.push(permission);
-  const effort = chipLabel(EFFORT_CHIPS, quickState.effort);
+  const effort = chipLabel(EFFORT_OPTIONS, quickState.effort);
   if (effort) parts.push(`${t("hudQuickEffortLabel")}：${effort}`);
   return parts.join(" · ");
 }
 
 // 认不出的值（主进程还没推过状态）什么都不写：宁可少一行字，也不要凭空造词。
-function chipLabel(chips, value) {
-  const chip = chips.find((item) => item.value === value);
-  return chip ? t(chip.labelKey) : "";
+function chipLabel(options, value) {
+  const option = options.find((item) => item.value === value);
+  return option ? t(option.labelKey) : "";
 }
 
 function sessionMetaText(item) {
@@ -387,15 +518,29 @@ function createInputRow() {
     window.sessionHudAPI.setHold("draft", promptInputEl.value.length > 0 || attachments.length > 0);
   });
 
-  inputRow.appendChild(promptInputEl);
-
+  // 输入框左边的「＋」：选文件（选中的会变成上面那行小标签）。放在左边，
+  // 右边就只留一个齿轮，输入框不会被两个按钮夹得太窄。
   const attachBtn = document.createElement("button");
   attachBtn.type = "button";
   attachBtn.className = "quick-attach-btn";
-  attachBtn.textContent = "📎";
+  attachBtn.textContent = "+";
   attachBtn.addEventListener("click", handleAttachFile);
   inputRow.appendChild(attachBtn);
   attachBtnEl = attachBtn;
+
+  inputRow.appendChild(promptInputEl);
+
+  // 输入框右边的齿轮：点开「设置」菜单（权限 + 强度）。和「＋」一样是个方块
+  // 按钮，只画齿轮不带字——两个字挤在这一行会把输入框压短。
+  settingsBtnEl = document.createElement("button");
+  settingsBtnEl.type = "button";
+  settingsBtnEl.className = "quick-settings-btn";
+  const gearIcon = document.createElement("span");
+  gearIcon.className = "quick-settings-icon";
+  gearIcon.textContent = "⚙";
+  settingsBtnEl.appendChild(gearIcon);
+  settingsBtnEl.addEventListener("click", () => handleToggleMenu("settings"));
+  inputRow.appendChild(settingsBtnEl);
 
   return inputRow;
 }
@@ -614,19 +759,21 @@ async function handleSendPrompt() {
   }
 }
 
-async function handleToggleList() {
+// 点状态行 / 点齿轮：开或关对应的菜单（再点一次同一个 = 收起，点另一个 = 切换）。
+async function handleToggleMenu(menu) {
   try {
-    await window.sessionHudAPI.setListOpen(!quickState.listOpen);
+    const next = quickState.menuOpen === menu ? null : menu;
+    await window.sessionHudAPI.setMenuOpen(next);
   } catch (err) {
-    console.warn("set list open threw:", err);
+    console.warn("set menu open threw:", err);
   }
 }
 
 async function handleSessionPick(sessionId) {
   try {
     await window.sessionHudAPI.selectSession(sessionId);
-    // 选完就把列表收起来（主进程会把新的展开状态推回来）
-    await window.sessionHudAPI.setListOpen(false);
+    // 选完就把菜单收起来（主进程会把新的展开状态推回来）
+    await window.sessionHudAPI.setMenuOpen(null);
   } catch (err) {
     console.warn("select session threw:", err);
   }
@@ -672,7 +819,7 @@ async function handlePendingPick() {
   if (!quickState.pendingId) return;
   try {
     await window.sessionHudAPI.selectSession(quickState.pendingId);
-    await window.sessionHudAPI.setListOpen(false);
+    await window.sessionHudAPI.setMenuOpen(null);
   } catch (err) {
     console.warn("select pending session threw:", err);
   }
@@ -684,6 +831,15 @@ async function handleCancelPending() {
   } catch (err) {
     console.warn("cancel pending session threw:", err);
   }
+}
+
+// 指针是否落在某张卡片里（菜单卡片收起时 display:none，测得的是 0×0，自然为假）。
+function inRect(el, event) {
+  if (!el || typeof el.getBoundingClientRect !== "function") return false;
+  const rect = el.getBoundingClientRect();
+  if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+  return event.clientX >= rect.left && event.clientX <= rect.right
+    && event.clientY >= rect.top && event.clientY <= rect.bottom;
 }
 
 /* ===== 组装 / 刷新 ===== */
@@ -702,19 +858,24 @@ function refreshTexts() {
     }
   }
   updateStatusRow();
-  updateSessionList();
+  updateMenu();
   // ✕ 的提示语按语言重画一遍（不重建输入框，焦点与草稿都不动）
   renderAttachments();
 }
 
 function buildPanel() {
   if (!hudEl) return;
+  // 菜单是主卡片上面另起的**一张卡片**（开着才淡入出现），主卡片高度不变。
+  menuCardEl = document.createElement("div");
+  menuCardEl.className = "quick-menu-card";
+  menuCardEl.appendChild(createSessionList());
+  hudEl.appendChild(menuCardEl);
+
   const card = document.createElement("div");
   card.className = "quick-card";
   cardEl = card;
   card.appendChild(createStatusRow());
-  card.appendChild(createSessionList());
-  // 附件标签行在输入框上面、列表下面：挂着的文件紧挨着你要打的那句话
+  // 附件标签行在输入框上面：挂着的文件紧挨着你要打的那句话
   card.appendChild(createAttachRow());
   card.appendChild(createInputRow());
   hudEl.appendChild(card);
@@ -736,15 +897,13 @@ async function init() {
   window.sessionHudAPI.onQuickState((next) => {
     quickState = normalizeQuickState(next);
     updateStatusRow();
-    updateSessionList();
+    updateMenu();
   });
-  // 指针进出卡片：卡片外的透明区放行点击（窗口比卡片高的那截），
+  // 指针进出卡片：两张卡片之外的透明区放行点击（窗口比卡片高的那截），
   // 别挡住底下应用的点击。主进程的轮询另有兜底。
   document.addEventListener("mousemove", (event) => {
     if (!cardEl) return;
-    const rect = cardEl.getBoundingClientRect();
-    const inside = event.clientX >= rect.left && event.clientX <= rect.right
-      && event.clientY >= rect.top && event.clientY <= rect.bottom;
+    const inside = inRect(cardEl, event) || inRect(menuCardEl, event);
     if (!inside === lastClickThrough) return;
     lastClickThrough = !inside;
     try {
@@ -754,11 +913,11 @@ async function init() {
     }
   });
 
-  // Esc 收起会话列表（面板整体的收起仍走鼠标离开）
+  // Esc 收起当前菜单（面板整体的收起仍走鼠标离开）
   document.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape" || !quickState.listOpen) return;
+    if (event.key !== "Escape" || !quickState.menuOpen) return;
     event.preventDefault();
-    window.sessionHudAPI.setListOpen(false);
+    window.sessionHudAPI.setMenuOpen(null);
   });
 
   try {

@@ -1094,8 +1094,8 @@ function buildQuickSendState() {
     // 新建会话的两个开关（渲染端按这组值画小按钮）。
     permissionMode: quickNewSessionPermissionMode,
     effort: quickNewSessionEffort,
-    // 会话列表展开状态：状态源在主进程（窗口高度要跟着变）。
-    listOpen: getSessionHudListOpen(),
+    // 开的是哪个菜单（null / "session" / "settings"）：状态源在主进程，窗口高度跟着变。
+    menuOpen: getSessionHudMenuOpen(),
   };
 }
 
@@ -2132,8 +2132,8 @@ let getQuotaRingWindow = () => null;
 // 快捷面板的可见矩形，供权限气泡/更新气泡避让（赋值发生在 _sessionHud
 // 创建之后，在此之前读到空数组是安全的）。
 let getSessionHudBlockRects = () => [];
-// 面板二级设置菜单的展开状态（状态源在 session-hud；同样延迟赋值）。
-let getSessionHudListOpen = () => false;
+// 面板开的是哪个菜单（状态源在 session-hud；同样延迟赋值）。
+let getSessionHudMenuOpen = () => null;
 function getVisibleSessionHudBounds() {
   try {
     const rects = getSessionHudBlockRects();
@@ -3144,7 +3144,7 @@ getSessionHudReservedOffset = _sessionHud.getHudReservedOffset;
 getSessionHudWindow = _sessionHud.getWindow;
 getSessionHudWindows = _sessionHud.getWindows;
 getSessionHudBlockRects = _sessionHud.getBlockRects;
-getSessionHudListOpen = () => !!(_sessionHud.isSessionListOpen && _sessionHud.isSessionListOpen());
+getSessionHudMenuOpen = () => (_sessionHud.getMenuOpen ? _sessionHud.getMenuOpen() : null);
 getQuotaRingWindow = _sessionHud.getQuotaRingWindow;
 
 agentRuntime = createAgentRuntimeMain({
@@ -5127,6 +5127,14 @@ async function quickSendPrompt(text) {
   if (!sessionPromptSend) return { status: "error", textKey: "hudQuickSendFailed" };
   const entry = resolveQuickTargetEntry();
   if (entry && entry.kind === "pending") return sendToPendingNewSession(entry.pending, text);
+  // 一个会话都没有（也没排新会话）：这句话就是新会话的第一句——直接开一个，
+  // 省得用户先去点「新建会话」。开不起来（不是 mac、接线缺失）时退回原来那条
+  // 路：交给下面的投递链，它会复制到剪贴板并如实提示。
+  if (!entry && process.platform === "darwin") {
+    const pending = ensurePendingNewSession();
+    quickSelectedSessionId = null;
+    return sendToPendingNewSession(pending, text);
+  }
   const result = await sessionPromptSend.send({ text });
   return {
     status: result.status === "sent" ? "ok" : result.status,
@@ -5191,8 +5199,10 @@ function quickSelectSession(sessionId) {
 // 「＋ 在终端里新建会话」：只在列表里排一个位，先不开终端。等第一句话发出去，
 // 才真在终端里开起来（见 sendToPendingNewSession）。再点一次是重新排一个
 // （同时只会有一个），取消走占位行右边的 ✕。
-function quickCreateSession() {
-  if (process.platform !== "darwin") return { status: "error", textKey: "hudNewSessionFailed" };
+// 排一个「新会话」占位。两处共用：点「＋ 在终端里新建会话」，以及一个会话都
+// 没有时直接发消息（那时候这句话本身就是新会话的第一句）。已经排过就接着用，
+// 不重复排。
+function ensurePendingNewSession() {
   if (!quickPendingNewSession) {
     quickPendingSeq += 1;
     quickPendingNewSession = {
@@ -5202,6 +5212,12 @@ function quickCreateSession() {
       launchedAt: 0,
     };
   }
+  return quickPendingNewSession;
+}
+
+function quickCreateSession() {
+  if (process.platform !== "darwin") return { status: "error", textKey: "hudNewSessionFailed" };
+  ensurePendingNewSession();
   // 刚排的新会话就是要发的地方：让开手选的那个会话。
   quickSelectedSessionId = null;
   pushQuickState();
@@ -5282,13 +5298,12 @@ async function quickSavePastedFile(payload) {
   return result;
 }
 
-// 渲染端上报指针进出卡片：卡片外的透明区让点击穿透（主进程轮询另有兜底）。
-// 会话列表展开/收起（点状态行）。
-function quickSetListOpen(open) {
-  if (!_sessionHud || typeof _sessionHud.setSessionListOpen !== "function") {
+// 渲染端上报开/关哪个菜单（点状态行 = 会话菜单，点齿轮 = 设置菜单）。
+function quickSetMenuOpen(menu) {
+  if (!_sessionHud || typeof _sessionHud.setMenuOpen !== "function") {
     return { status: "error", reason: "quick-panel-unavailable" };
   }
-  _sessionHud.setSessionListOpen(open === true);
+  _sessionHud.setMenuOpen(menu === "session" || menu === "settings" ? menu : null);
   pushQuickState();
   return { status: "ok" };
 }
@@ -5344,7 +5359,7 @@ registerSessionIpc({
   quickPickFiles,
   quickSavePastedFile,
   quickSetNewSessionOption,
-  quickSetListOpen,
+  quickSetMenuOpen,
   quickSetHold,
   quickSetAttachments,
   quickSetClickThrough,

@@ -102,8 +102,8 @@ function createHarness(overrides = {}) {
             calls.push(["quickSetNewSessionOption", key, value]);
             return { status: "ok" };
           }),
-        quickSetListOpen: overrides.quickSetListOpen
-          || ((open) => { calls.push(["quickSetListOpen", open]); return { status: "ok" }; }),
+        quickSetMenuOpen: overrides.quickSetMenuOpen
+          || ((menu) => { calls.push(["quickSetMenuOpen", menu]); return { status: "ok" }; }),
         quickSetHold: overrides.quickSetHold
           || ((reason, held) => { calls.push(["quickSetHold", reason, held]); }),
         quickSetClickThrough: overrides.quickSetClickThrough
@@ -233,7 +233,7 @@ test("session IPC registers owned channels and disposes them", () => {
     "session-hud:save-pasted-file",
     "session-hud:select-session",
     "session-hud:send-prompt",
-    "session-hud:set-list-open",
+    "session-hud:set-menu-open",
     "session-hud:set-new-session-option",
     "session:ack-completion",
   ]);
@@ -742,6 +742,32 @@ test("select-session 的载荷闸门：只认非空字符串 id", async () => {
     { status: "ok" }
   );
   assert.deepStrictEqual(calls, [["quickSelectSession", "s1"]]);
+});
+
+test("set-menu-open 的载荷闸门：只认 session / settings，其它一律当收起", async () => {
+  const { ipcMain, calls, trustedHudEvent } = createHarness();
+
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-menu-open", { menu: "session" }),
+    { status: "ok" }
+  );
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-menu-open", { menu: "settings" }),
+    { status: "ok" }
+  );
+  // 不认识的值、缺字段、垃圾载荷：一律当「收起」交给主进程，不触达别的能力
+  for (const payload of [{ menu: "bogus" }, { menu: null }, {}, undefined, 42]) {
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-menu-open", payload);
+  }
+  assert.deepStrictEqual(calls, [
+    ["quickSetMenuOpen", "session"],
+    ["quickSetMenuOpen", "settings"],
+    ["quickSetMenuOpen", null],
+    ["quickSetMenuOpen", null],
+    ["quickSetMenuOpen", null],
+    ["quickSetMenuOpen", null],
+    ["quickSetMenuOpen", null],
+  ]);
 });
 
 test("set-new-session-option 的载荷闸门：键与值都必须在允许表里", async () => {

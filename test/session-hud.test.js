@@ -13,11 +13,13 @@ const path = require("node:path");
 const sessionHud = require("../src/session-hud");
 const {
   QUICK_CARD,
-  QUICK_CARD_EXPANDED,
+  QUICK_MENU_CARD,
+  QUICK_MENU_GAP,
   QUICK_ATTACH_ROW,
   QUICK_ATTACH_EXTRA,
   quickCardHeight,
   QUICK_SHELL,
+  QUICK_DROP,
   computeBlockBounds,
   evaluateBaseEligible,
   evaluateShouldShow,
@@ -64,6 +66,112 @@ describe("快捷面板整卡几何", () => {
       result.bounds.height,
       QUICK_CARD.height + QUICK_SHELL.top + QUICK_SHELL.bottom
     );
+  });
+
+  it("nudges the whole panel down by QUICK_DROP", () => {
+    const common = {
+      hitRect: HIT_RECT,
+      anchorRect: null,
+      workArea: WORK_AREA,
+      cardW: QUICK_CARD.width,
+      cardH: QUICK_CARD.height,
+      shell: QUICK_SHELL,
+      prefer: "left",
+      scale: 1,
+      widthScale: 1,
+    };
+    const plain = computeBlockBounds(common);
+    const dropped = computeBlockBounds({ ...common, dropY: QUICK_DROP });
+    // 收起态整体下移：窗口矩形和内容矩形都跟着走，高度不变
+    assert.equal(dropped.contentBounds.y - plain.contentBounds.y, QUICK_DROP);
+    assert.equal(dropped.bounds.y - plain.bounds.y, QUICK_DROP);
+    assert.equal(dropped.bounds.height, plain.bounds.height);
+  });
+
+  it("keeps the bottom edge pinned when the panel grows, drop included", () => {
+    const common = {
+      hitRect: HIT_RECT,
+      anchorRect: null,
+      workArea: WORK_AREA,
+      cardW: QUICK_CARD.width,
+      shell: QUICK_SHELL,
+      prefer: "left",
+      scale: 1,
+      widthScale: 1,
+      dropY: QUICK_DROP,
+    };
+    const collapsed = computeBlockBounds({ ...common, cardH: QUICK_CARD.height });
+    const expanded = computeBlockBounds({
+      ...common,
+      cardH: quickCardHeight("session", false),
+      baseCardH: QUICK_CARD.height,
+    });
+    const bottomOf = (r) => r.contentBounds.y + r.contentBounds.height;
+    assert.equal(bottomOf(expanded), bottomOf(collapsed));
+    // 长出来的高度全在上方
+    assert.ok(expanded.contentBounds.y < collapsed.contentBounds.y);
+  });
+
+  it("the drop never pushes the panel out of the work area", () => {
+    const petAtBottom = { left: 700, top: 860, right: 760, bottom: 895 };
+    const dropped = computeBlockBounds({
+      hitRect: petAtBottom,
+      anchorRect: null,
+      workArea: WORK_AREA,
+      cardW: QUICK_CARD.width,
+      cardH: QUICK_CARD.height,
+      shell: QUICK_SHELL,
+      prefer: "left",
+      scale: 1,
+      widthScale: 1,
+      dropY: QUICK_DROP,
+    });
+    assert.ok(
+      dropped.contentBounds.y + dropped.contentBounds.height
+        <= WORK_AREA.y + WORK_AREA.height
+    );
+  });
+
+  it("整扇窗口（含上下壳）都留在工作区里：桌宠贴屏幕下沿也不越界", () => {
+    const petAtBottom = { left: 700, top: 860, right: 760, bottom: 895 };
+    const result = computeBlockBounds({
+      hitRect: petAtBottom,
+      anchorRect: null,
+      workArea: WORK_AREA,
+      cardW: QUICK_CARD.width,
+      cardH: QUICK_CARD.height,
+      shell: QUICK_SHELL,
+      prefer: "left",
+      scale: 1,
+      widthScale: 1,
+      dropY: QUICK_DROP,
+    });
+    // 窗口底边越出屏幕的话，macOS 会把窗口顶回屏幕内，面板就会「先出现在
+    // 偏上的位置、下一次刷新再往下蹦一下」，热区判定也跟着和眼睛看到的错位。
+    assert.ok(
+      result.bounds.y + result.bounds.height <= WORK_AREA.y + WORK_AREA.height,
+      "窗口底边（含 60px 输入法净空）不能越出工作区"
+    );
+    assert.ok(result.bounds.y >= WORK_AREA.y, "窗口顶边也在工作区内");
+    // 展开（开菜单）时也一样：长大只往上，底边不越界
+    const expanded = computeBlockBounds({
+      hitRect: petAtBottom,
+      anchorRect: null,
+      workArea: WORK_AREA,
+      cardW: QUICK_CARD.width,
+      cardH: quickCardHeight("settings", false),
+      baseCardH: QUICK_CARD.height,
+      shell: QUICK_SHELL,
+      prefer: "left",
+      scale: 1,
+      widthScale: 1,
+      dropY: QUICK_DROP,
+    });
+    assert.ok(
+      expanded.bounds.y + expanded.bounds.height <= WORK_AREA.y + WORK_AREA.height,
+      "展开态同样不越界"
+    );
+    assert.ok(expanded.bounds.y >= WORK_AREA.y, "展开态的顶边也不越界");
   });
 
   it("falls back to the other side when the preferred side has no room", () => {
@@ -256,29 +364,42 @@ describe("卡片几何（只剩状态行 + 输入行）", () => {
     assert.ok(bounds.contentBounds.x < HIT_RECT.left, "默认贴桌宠左侧");
   });
 
-  it("展开态只服务于会话列表（内置客户端的二级菜单已经删掉）", () => {
-    assert.doesNotMatch(src, /quick-menu|quick-mode-option|quick-effort/);
-    assert.doesNotMatch(src, /setMenuOpen|isMenuOpen/);
-    // 列表展开：卡片变高 + 钉住 hold，收起时复位
-    assert.match(src, /cardH: quickCardHeight\(sessionListOpen, attachmentCount > 0\)/);
+  it("两个菜单分开：会话菜单由状态行开，设置菜单由齿轮开", () => {
+    // 老的二级菜单（quick-menu / quick-mode-option 那几个类名）不能复活；
+    // 现在的菜单卡片类名是 .quick-menu-card，由渲染端与 HTML 认领。
+    assert.doesNotMatch(src, /quick-mode-option|quick-effort-range/);
+    // 菜单展开：卡片变高 + 钉住 hold，收起时复位；两个菜单互斥
+    assert.match(src, /cardH: quickCardHeight\(menuOpen, attachmentCount > 0\)/);
     assert.match(src, /if \(next\) holdReasons\.add\("menu"\);/);
-    assert.match(src, /function setSessionListOpen\(open\)/);
+    assert.match(src, /function setMenuOpen\(menu\)/);
+    assert.match(src, /const next = menu === "session" \|\| menu === "settings" \? menu : null/);
   });
 
-  it("卡片高度：展开与附件两种加法可以叠加", () => {
-    // 收起 66；展开 +254（列表区 250 + 一个行距 4）；附件再 +28（标签行 24 + 一个行距 4）
+  it("窗口内容高度：主卡片 + 间距 + 菜单卡片，附件是主卡片上的加法", () => {
+    // 主卡片 66（挂附件 94）；菜单卡片浮在上面，中间隔 6px。
     assert.strictEqual(QUICK_ATTACH_ROW.height, 24);
     assert.strictEqual(QUICK_ATTACH_EXTRA, 24 + 4);
-    assert.strictEqual(quickCardHeight(false, false), QUICK_CARD.height);
-    assert.strictEqual(quickCardHeight(true, false), QUICK_CARD_EXPANDED.height);
-    assert.strictEqual(quickCardHeight(false, true), QUICK_CARD.height + QUICK_ATTACH_EXTRA);
+    assert.strictEqual(QUICK_MENU_CARD.session, 178 + 6 + 6 + 2);
+    assert.strictEqual(QUICK_MENU_CARD.settings, 228 + 6 + 6 + 2);
+    assert.strictEqual(QUICK_MENU_GAP, 6);
+
+    assert.strictEqual(quickCardHeight(null, false), QUICK_CARD.height);
+    assert.strictEqual(quickCardHeight("session", false), QUICK_CARD.height + 6 + QUICK_MENU_CARD.session);
+    assert.strictEqual(quickCardHeight("settings", false), QUICK_CARD.height + 6 + QUICK_MENU_CARD.settings);
+    assert.strictEqual(quickCardHeight(null, true), QUICK_CARD.height + QUICK_ATTACH_EXTRA);
     assert.strictEqual(
-      quickCardHeight(true, true),
-      QUICK_CARD_EXPANDED.height + QUICK_ATTACH_EXTRA
+      quickCardHeight("session", true),
+      QUICK_CARD.height + QUICK_ATTACH_EXTRA + 6 + QUICK_MENU_CARD.session
     );
+    assert.strictEqual(
+      quickCardHeight("settings", true),
+      QUICK_CARD.height + QUICK_ATTACH_EXTRA + 6 + QUICK_MENU_CARD.settings
+    );
+    // 乱给的值就当收起处理
+    assert.strictEqual(quickCardHeight("bogus", false), QUICK_CARD.height);
   });
 
-  it("展开会话列表时卡片变高，且只往上长（底边钉住）", () => {
+  it("开菜单时卡片变高，且只往上长（底边钉住）", () => {
     const base = {
       hitRect: HIT_RECT, anchorRect: null, workArea: WORK_AREA,
       cardW: QUICK_CARD.width, shell: QUICK_SHELL,
@@ -286,7 +407,7 @@ describe("卡片几何（只剩状态行 + 输入行）", () => {
     };
     const collapsed = computeBlockBounds({ ...base, cardH: QUICK_CARD.height });
     const opened = computeBlockBounds({
-      ...base, cardH: QUICK_CARD_EXPANDED.height, baseCardH: QUICK_CARD.height,
+      ...base, cardH: quickCardHeight("session", false), baseCardH: QUICK_CARD.height,
     });
     assert.equal(opened.contentBounds.x, collapsed.contentBounds.x, "贴桌宠那一侧不动");
     assert.equal(
@@ -296,9 +417,14 @@ describe("卡片几何（只剩状态行 + 输入行）", () => {
     );
     assert.ok(opened.contentBounds.y < collapsed.contentBounds.y);
     assert.strictEqual(
-      QUICK_CARD_EXPANDED.height - QUICK_CARD.height,
-      250 + 4,
-      "列表区 250（4 条会话 4×28 + 新建 28 + 两个开关 34+34 + 选文件夹 28 + 行距 7×2），再加一个卡片行距 4"
+      quickCardHeight("session", false) - QUICK_CARD.height,
+      6 + 192,
+      "会话菜单卡片 192（列表区 178 + 内边距 12 + 边框 2）＋ 6px 间距"
+    );
+    assert.strictEqual(
+      quickCardHeight("settings", false) - QUICK_CARD.height,
+      6 + 242,
+      "设置菜单卡片 242（列表区 228 + 内边距 12 + 边框 2）＋ 6px 间距"
     );
   });
 
@@ -501,6 +627,16 @@ describe("快捷面板源码级契约", () => {
     assert.match(src, /function getPanelCardRect\(\)/);
     assert.match(src, /const cardHeight = Math\.ceil\(QUICK_CARD\.height \* getTextScale\(\)\)/);
     assert.match(src, /y: Math\.round\(content\.y \+ content\.height - cardHeight\)/);
+  });
+
+  it("一个会话都没有时，发消息会自己开一个新会话（main 侧接线）", () => {
+    // 两条入口共用同一个占位构造：点「＋ 在终端里新建会话」，以及没会话时直接发。
+    assert.match(mainSrc, /function ensurePendingNewSession\(\) \{/);
+    assert.match(mainSrc, /function quickCreateSession\(\) \{[\s\S]*?ensurePendingNewSession\(\);/);
+    assert.match(mainSrc, /if \(!entry && process\.platform === "darwin"\) \{/);
+    assert.match(mainSrc, /const pending = ensurePendingNewSession\(\);/);
+    // 交给同一条「新会话」路径：终端里开起来 + 把这句话当第一句送进去。
+    assert.match(mainSrc, /return sendToPendingNewSession\(pending, text\);/);
   });
 
   it("回复窗口这一整条链已经拆干净（面板只往终端里发消息）", () => {
