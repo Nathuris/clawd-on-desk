@@ -4691,6 +4691,11 @@ const _menuCtx = {
   set openAtLogin(v) { _settingsController.applyUpdate("openAtLogin", v); },
   get bubbleFollowPet() { return bubbleFollowPet; },
   set bubbleFollowPet(v) { _settingsController.applyUpdate("bubbleFollowPet", v); },
+  // 右键菜单里的「自由漫步」开关。和设置里那个是同一个字段（freeRoam）：
+  // 走 applyUpdate 落盘，再由 settings-effect-router 通知 roam 运行时启停，
+  // 所以菜单和设置两边永远显示同一个值。
+  get freeRoam() { return _settingsController.get("freeRoam") === true; },
+  set freeRoam(v) { _settingsController.applyUpdate("freeRoam", !!v); },
   get hideBubbles() { return getAllBubblesHidden(); },
   set hideBubbles(v) { _settingsController.applyCommand("setAllBubblesHidden", { hidden: !!v }).catch((err) => {
     console.warn("Clawd: setAllBubblesHidden failed:", err && err.message);

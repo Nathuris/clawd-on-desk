@@ -497,6 +497,14 @@ module.exports = function initMenu(ctx) {
         label: ctx.doNotDisturb ? t("wake") : t("sleep"),
         click: () => ctx.doNotDisturb ? ctx.disableDoNotDisturb() : ctx.enableDoNotDisturb(),
       },
+      // 自由漫步：和迷你模式一样是"宠物怎么动"，所以挨着它放。勾选框读的是
+      // 当前值、写的是同一条偏好（设置里那个开关就是这个字段），两处永远一致。
+      {
+        label: t("freeRoam"),
+        type: "checkbox",
+        checked: ctx.freeRoam === true,
+        click: (menuItem) => { ctx.freeRoam = menuItem.checked; },
+      },
     ];
 
     const workGroup = [
@@ -505,10 +513,6 @@ module.exports = function initMenu(ctx) {
         click: () => {
           if (typeof ctx.openDashboard === "function") ctx.openDashboard();
         },
-      },
-      {
-        label: t("openRecap"),
-        click: () => ctx.openSettingsWindow({ tab: "recap" }),
       },
       // Danger auto-approve sits at the tail of the work group: it governs how
       // agent permission requests are handled, and keeping it here (rather than

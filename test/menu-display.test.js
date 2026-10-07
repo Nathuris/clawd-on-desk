@@ -533,7 +533,7 @@ describe("menu dashboard action", () => {
 });
 
 describe("menu recap action", () => {
-  it("adds a right-click item that deep-links to the recap tab", () => {
+  it("右键菜单里不再放「打开足迹」（它只从设置里进）", () => {
     const fakeElectron = {
       app: { quit: () => {}, setActivationPolicy: () => {}, dock: { show: () => {}, hide: () => {} } },
       BrowserWindow: function BrowserWindow() {},
@@ -547,12 +547,52 @@ describe("menu recap action", () => {
       },
     };
     const initMenu = loadMenuWithElectron(fakeElectron);
-    const calls = [];
-    const ctx = buildBaseCtx({ openSettingsWindow: (options) => calls.push(options) });
+    const ctx = buildBaseCtx();
     initMenu(ctx).buildContextMenu();
     const item = ctx.contextMenu.template.find((candidate) => candidate.label === "Open Footprints");
-    assert.ok(item);
-    item.click();
-    assert.deepStrictEqual(calls, [{ tab: "recap" }]);
+    assert.strictEqual(item, undefined, "右键菜单不该再有这一项");
+  });
+
+  it("右键菜单里有一键开关「自由漫步」，读写的是设置里同一条偏好", () => {
+    const fakeElectron = {
+      app: { quit: () => {}, setActivationPolicy: () => {}, dock: { show: () => {}, hide: () => {} } },
+      BrowserWindow: function BrowserWindow() {},
+      Menu: { buildFromTemplate: (template) => ({ template }) },
+      Tray: function Tray() {},
+      nativeImage: { createFromPath: () => ({ resize() { return this; }, setTemplateImage() {} }) },
+      screen: {
+        getAllDisplays: () => [{ id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 }, workArea: { x: 0, y: 0, width: 1920, height: 1040 } }],
+        getCursorScreenPoint: () => ({ x: 0, y: 0 }),
+        getDisplayNearestPoint: () => ({ id: 1 }),
+      },
+    };
+    const initMenu = loadMenuWithElectron(fakeElectron);
+    const written = [];
+    let value = false;
+    const ctx = buildBaseCtx();
+    // 主进程那边 freeRoam 是取值器/写值器（读设置、写设置），这里照同一形状铺
+    Object.defineProperty(ctx, "freeRoam", {
+      configurable: true,
+      get: () => value,
+      set: (next) => { value = next; written.push(next); },
+    });
+
+    initMenu(ctx).buildContextMenu();
+    const item = ctx.contextMenu.template.find((candidate) => candidate.label === "Free roam");
+    assert.ok(item, "右键菜单要有「自由漫步」");
+    assert.strictEqual(item.type, "checkbox");
+    assert.strictEqual(item.checked, false, "勾选框读的是当前值");
+
+    item.click({ checked: true });
+    assert.deepStrictEqual(written, [true], "点一下写的是同一条偏好");
+
+    // 关掉也是同一条路：菜单和设置永远显示同一个值，不存在两份状态
+    value = true;
+    ctx.contextMenu = null;
+    initMenu(ctx).buildContextMenu();
+    const onItem = ctx.contextMenu.template.find((candidate) => candidate.label === "Free roam");
+    assert.strictEqual(onItem.checked, true);
+    onItem.click({ checked: false });
+    assert.deepStrictEqual(written, [true, false]);
   });
 });
