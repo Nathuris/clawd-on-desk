@@ -108,6 +108,8 @@ function createHarness(overrides = {}) {
           || ((level) => { calls.push(["quickApplyEffort", level]); return { status: "sent" }; }),
         quickResumeSession: overrides.quickResumeSession
           || ((payload) => { calls.push(["quickResumeSession", payload]); return { status: "submitted" }; }),
+        quickSetSessionPin: overrides.quickSetSessionPin
+          || ((payload) => { calls.push(["quickSetSessionPin", payload]); return { status: "ok" }; }),
         quickSetHold: overrides.quickSetHold
           || ((reason, held) => { calls.push(["quickSetHold", reason, held]); }),
         quickSetClickThrough: overrides.quickSetClickThrough
@@ -241,6 +243,7 @@ test("session IPC registers owned channels and disposes them", () => {
     "session-hud:send-prompt",
     "session-hud:set-menu-open",
     "session-hud:set-new-session-option",
+    "session-hud:set-session-pin",
     "session:ack-completion",
   ]);
   assert.deepStrictEqual([...ipcMain.listeners.keys()].sort(), [
@@ -895,6 +898,60 @@ test("resume-session 的载荷闸门：只认 agent 与 32 位 hex 的 historyKe
     { status: "error", reason: "untrusted-hud-sender" }
   );
   assert.deepStrictEqual(calls.length, 1, "不可信的 sender 不该触达 owner");
+});
+
+test("set-session-pin 的载荷闸门：只认两种 target 形状", async () => {
+  const { ipcMain, calls, trustedHudEvent, hudWebContents, hudMainFrame } = createHarness();
+  const sessionTarget = { target: { kind: "session", sessionId: "s1" }, pinned: true };
+  const historyTarget = {
+    target: { kind: "history", agentId: "claude-code", historyKey: "a".repeat(32) },
+    pinned: false,
+  };
+
+  const bad = [
+    undefined,
+    null,
+    [],
+    "s1",
+    {},
+    { target: sessionTarget.target },
+    { pinned: true },
+    { target: sessionTarget.target, pinned: "yes" },
+    { target: sessionTarget.target, pinned: true, extra: 1 },
+    { target: { kind: "session" }, pinned: true },
+    { target: { kind: "session", sessionId: "" }, pinned: true },
+    { target: { kind: "session", sessionId: "s1", cwd: "/tmp" }, pinned: true },
+    { target: { kind: "bogus", sessionId: "s1" }, pinned: true },
+    { target: { kind: "history", agentId: "claude-code" }, pinned: true },
+    { target: { kind: "history", agentId: "", historyKey: "a".repeat(32) }, pinned: true },
+    { target: { kind: "history", agentId: "claude-code", historyKey: "zz" }, pinned: true },
+    { target: { kind: "history", agentId: "claude-code", historyKey: "0".repeat(31) }, pinned: true },
+  ];
+  for (const payload of bad) {
+    const result = await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-session-pin", payload);
+    assert.deepStrictEqual(result, { status: "invalid" }, JSON.stringify(payload));
+  }
+  assert.deepStrictEqual(calls, [], "非法载荷不得触达 owner");
+
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-session-pin", sessionTarget),
+    { status: "ok" }
+  );
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:set-session-pin", historyTarget),
+    { status: "ok" }
+  );
+  assert.deepStrictEqual(calls, [
+    ["quickSetSessionPin", sessionTarget],
+    ["quickSetSessionPin", historyTarget],
+  ]);
+
+  const forged = { sender: hudWebContents, senderFrame: { ...hudMainFrame } };
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(forged, "session-hud:set-session-pin", sessionTarget),
+    { status: "error", reason: "untrusted-hud-sender" }
+  );
+  assert.deepStrictEqual(calls.length, 2, "不可信的 sender 不该触达 owner");
 });
 
 test("pick-file 只认 HUD 主 frame，并把路径交回渲染端", async () => {

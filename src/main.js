@@ -202,6 +202,7 @@ const { isSessionInProgress } = require("./state-session-snapshot");
 const { restoreSessionsFromRecoveryLeases } = require("./session-recovery-loader");
 const { createSessionHistoryRuntime } = require("./session-history-runtime");
 const { createQuickHistoryCache } = require("./quick-history-cache");
+const { sessionPinKey } = require("./session-pins");
 const { getAllAgents, getAgent } = require("../agents/registry");
 const { getAgentIconUrl } = require("./state-agent-icons");
 const { stripInheritedClaudeSessionEnv } = require("./claude-session-env");
@@ -1031,6 +1032,9 @@ function listQuickSessions() {
       const runtime = sessions.get(String(entry.id)) || null;
       return {
         id: entry.id,
+        // 置顶 key 要用它：同一个会话在面板里用的是 action id，在历史仓里用的是
+        // transcript 的 session id，两者靠 rawSessionId 对上。
+        rawSessionId: entry.rawSessionId || null,
         displayTitle: entry.displayTitle || entry.sessionTitle || null,
         folder: entry.cwd ? path.basename(entry.cwd) : null,
         cwd: entry.cwd || null,
@@ -1052,7 +1056,9 @@ function listQuickSessions() {
 // 面板里「最近」那一组的一行。只带展示要用的字段 + 一个不透明的 historyKey：
 // 完整的 session id、cwd 全路径、transcript 路径都不进 IPC（loader 本来就刻意
 // 不带路径，这里也别加回来）。续跑时渲染端只把这个 key 递回来，主进程自己回查。
-function projectQuickHistoryRow(row) {
+function projectQuickHistoryRow(row, pins = {}) {
+  const pinKey = sessionPinKey(row.agentId, row.sessionId);
+  const pin = pinKey ? pins[pinKey] : null;
   return {
     historyKey: row.historyKey,
     agentId: row.agentId,
@@ -1070,13 +1076,33 @@ function projectQuickHistoryRow(row) {
     resumeDisabledReason: row.resumeDisabledReason || null,
     group: row.group === "other" ? "other" : "confirmed",
     resumePending: row.resumePending === true,
+    // 置顶状态与钉的时间（排序用）。是否钉着由主进程判断，渲染端只管画。
+    pinned: !!pin,
+    pinnedAt: pin ? pin.pinnedAt : null,
   };
 }
 
-function quickHistoryProjection() {
+// 面板里被置顶的会话。读的是配置文件里的 sessionPins（key -> {pinnedAt}）。
+function quickSessionPins() {
+  try {
+    const pins = _settingsController.get("sessionPins");
+    return pins && typeof pins === "object" && !Array.isArray(pins) ? pins : {};
+  } catch {
+    return {};
+  }
+}
+
+function pinEntryFor(pins, agentId, sessionId) {
+  const key = sessionPinKey(agentId, sessionId);
+  const entry = key ? pins[key] : null;
+  return entry && Number.isFinite(entry.pinnedAt) ? entry : null;
+}
+
+function quickHistoryProjection(pins = {}) {
   const cached = quickHistoryCache ? quickHistoryCache.peek() : null;
   if (!cached) return { rows: [], truncated: 0 };
-  const rows = cached.rows.slice(0, QUICK_HISTORY_MAX_ROWS).map(projectQuickHistoryRow);
+  const rows = cached.rows.slice(0, QUICK_HISTORY_MAX_ROWS)
+    .map((row) => projectQuickHistoryRow(row, pins));
   // 两处截断都要如实报出来：读盘那一层的（loader 的 limit）和面板这一层的。
   const truncated = cached.truncated + Math.max(0, cached.rows.length - QUICK_HISTORY_MAX_ROWS);
   return { rows, truncated };
@@ -1121,7 +1147,22 @@ function buildQuickSendState() {
   const target = entry && entry.kind === "session" ? entry.session : null;
   const pending = quickPendingNewSession;
   const newSessionFolder = resolveQuickNewSessionFolder();
-  const history = quickHistoryProjection();
+  const pins = quickSessionPins();
+  const history = quickHistoryProjection(pins);
+  // 每条会话的置顶标记。listQuickSessions() 的**顺序一行不动**（下面
+  // resolveQuickSessionTarget 拿 all[0] 当"最近活动的会话"兜底），
+  // 排序只在下面这两个数组里做。
+  const withPins = all.map((item) => {
+    const pin = pinEntryFor(pins, item.agentId, item.rawSessionId || item.id);
+    return { ...item, pinned: !!pin, pinnedAt: pin ? pin.pinnedAt : null };
+  });
+  // 置顶组排在最前。组内先"活着的"再"历史"——上面那拨是能直接收消息的，
+  // 这个界线不能让置顶给搅乱；同一拨里按钉的时间倒序（最近钉的在最上面）。
+  const byPinnedAt = (a, b) => b.pinnedAt - a.pinnedAt;
+  const pinnedSessions = withPins.filter((item) => item.pinned)
+    .sort(byPinnedAt);
+  const pinnedHistory = history.rows.filter((row) => row.pinned)
+    .sort(byPinnedAt);
   return {
     targetId: target ? target.id : null,
     targetTitle: target ? target.displayTitle : null,
@@ -1135,18 +1176,34 @@ function buildQuickSendState() {
     pendingLaunched: !!(pending && pending.launched),
     // 目标文件夹的完整路径：新建会话要在同一个项目里开。
     targetCwd: target ? target.cwd : null,
-    sessions: all.map((item) => ({
-      id: item.id,
-      title: item.displayTitle,
-      folder: item.folder,
-      state: item.state,
-      active: !!target && item.id === target.id,
-    })),
+    sessions: withPins
+      .filter((item) => !item.pinned)
+      .map((item) => ({
+        id: item.id,
+        title: item.displayTitle,
+        folder: item.folder,
+        state: item.state,
+        active: !!target && item.id === target.id,
+      })),
     // 历史会话（「最近」那一组）。点一下 = 让 Claude Code 把那个会话重新拉起来
     // 接着聊，不是"往那儿发消息"——它现在根本没在跑。
-    history: history.rows,
+    history: history.rows.filter((row) => !row.pinned),
     // 还有多少条更早的没列出来（读盘那层 + 面板这层），面板要如实说，不许静默截断
     historyTruncated: history.truncated,
+    // 置顶的那几条（活着的在前、历史的在后），已经从上面两个数组里剔掉了，
+    // 免得同一条画两遍。kind 决定点了是什么行为：session = 选中，history = 续跑。
+    pinnedItems: [
+      ...pinnedSessions.map((item) => ({
+        kind: "session",
+        id: item.id,
+        title: item.displayTitle,
+        folder: item.folder,
+        state: item.state,
+        active: !!target && item.id === target.id,
+        pinnedAt: item.pinnedAt,
+      })),
+      ...pinnedHistory.map((row) => ({ ...row, kind: "history" })),
+    ],
     canCreateSession: process.platform === "darwin",
     // 新建会话的落地目录：短路径给「选择文件夹」那一行的第二行小字，
     // 目录名给「新建会话」那一行，让用户点之前就知道会开在哪儿。
@@ -5398,6 +5455,58 @@ function quickSetMenuOpen(menu) {
   return { status: "ok" };
 }
 
+// 面板里点那个 📌：置顶 / 取消置顶一条会话（活着的或历史的都行）。
+// 只影响面板列表的排序，没有任何运行副作用——不拉起进程、不改发送目标。
+//
+// 渲染端只说自己点的是哪一行（一个 action id 或一个不透明的 historyKey），
+// 身份一律主进程回查：agent 与 session id 都由这儿查出来，不从渲染端接。
+async function quickSetSessionPin(payload) {
+  if (!payload || typeof payload !== "object") return { status: "error", reason: "invalid" };
+  const target = payload.target;
+  if (!target || typeof target !== "object") return { status: "error", reason: "invalid" };
+  if (typeof payload.pinned !== "boolean") return { status: "error", reason: "invalid" };
+
+  let agentId = null;
+  let sessionId = null;
+  if (target.kind === "session") {
+    if (typeof target.sessionId !== "string" || !target.sessionId) {
+      return { status: "error", reason: "invalid" };
+    }
+    const entry = _state.sessions.get(target.sessionId);
+    if (!entry) return { status: "error", reason: "unknown-session" };
+    agentId = entry.agentId || null;
+    sessionId = entry.rawSessionId || target.sessionId;
+  } else if (target.kind === "history") {
+    if (typeof target.agentId !== "string" || !target.agentId) {
+      return { status: "error", reason: "invalid" };
+    }
+    if (typeof target.historyKey !== "string" || !/^[a-f0-9]{32}$/.test(target.historyKey)) {
+      return { status: "error", reason: "invalid" };
+    }
+    // 注意用的是「不要求目录还在」的那一个：项目文件夹删了、临时目录清了的
+    // 会话照样该能置顶。续跑那条路才需要目录真的在。
+    const identity = sessionHistoryRuntime
+      ? sessionHistoryRuntime.resolveIdentity(target.agentId, target.historyKey)
+      : null;
+    if (!identity) return { status: "error", reason: "unknown-history" };
+    agentId = identity.agentId;
+    sessionId = identity.sessionId;
+  } else {
+    return { status: "error", reason: "invalid" };
+  }
+
+  // applyCommand 一律是异步的：必须等它落盘之后再回执，否则写成功了也会报失败，
+  // 而且推状态时读到的还是旧的那份置顶表（列表不动）。
+  const result = await _settingsController.applyCommand(
+    "setSessionPin",
+    { agentId, sessionId, pinned: payload.pinned }
+  );
+  pushQuickState();
+  return result && result.status === "ok"
+    ? { status: "ok" }
+    : { status: "error", reason: "store-failed" };
+}
+
 // 面板里点一条历史会话 = 把那个会话重新拉起来接着聊（和 Dashboard 上是同一件事，
 // 走同一个 runtime：agent 开关、去重、30 秒确认窗都一样）。
 // 注意这里**不带**权限模式参数：从面板续跑只用普通权限，"跳过确认"那条路仍然
@@ -5476,6 +5585,7 @@ registerSessionIpc({
   quickSetNewSessionOption,
   quickApplyEffort,
   quickResumeSession,
+  quickSetSessionPin,
   quickSetMenuOpen,
   quickSetHold,
   quickSetAttachments,

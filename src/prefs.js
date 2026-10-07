@@ -51,6 +51,7 @@ const {
   MAX_AUTO_CLOSE_SECONDS,
 } = require("./bubble-policy");
 const { normalizeSessionAliases } = require("./session-alias");
+const { normalizeSessionPins } = require("./session-pins");
 const {
   TEXT_SCALE_MIN,
   TEXT_SCALE_MAX,
@@ -522,6 +523,14 @@ const SCHEMA = {
     type: "object",
     defaultFactory: () => ({}),
     normalize: normalizeSessionAliases,
+  },
+  // 面板里被置顶的会话（key -> {pinnedAt}）。和别名一样是"按会话"的偏好，
+  // 但**不过期**：历史会话可能很久以后才再出现，按时间清掉会让用户下周回来
+  // 发现钉的东西没了。只受条数上限约束（见 src/session-pins.js）。
+  sessionPins: {
+    type: "object",
+    defaultFactory: () => ({}),
+    normalize: normalizeSessionPins,
   },
   // Remote SSH (Phase 2 plan-remote-ssh-one-click v7). Stores user-defined
   // SSH tunnel profiles. The runtime is owned by `remote-ssh-runtime.js` —

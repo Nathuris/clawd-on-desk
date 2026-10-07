@@ -3602,3 +3602,87 @@ describe("version validator", () => {
     assert.strictEqual(updateRegistry.version("1", deps).status, "error");
   });
 });
+
+describe("setSessionPin command", () => {
+  const deps = (snapshot, now = 1000) => ({ snapshot, now });
+
+  it("置顶一条会话：key 只跟 agent 与 session id 有关", () => {
+    const snapshot = { ...prefs.getDefaults(), sessionPins: {} };
+    const r = commandRegistry.setSessionPin(
+      { agentId: "claude-code", sessionId: "raw-1", pinned: true }, deps(snapshot)
+    );
+    assert.strictEqual(r.status, "ok");
+    assert.deepStrictEqual(r.commit.sessionPins, {
+      "local|claude-code|raw-1": { pinnedAt: 1000 },
+    });
+  });
+
+  it("取消置顶，以及重复操作的幂等 noop", () => {
+    const pinned = { "local|claude-code|raw-1": { pinnedAt: 1000 } };
+    const snapshot = { ...prefs.getDefaults(), sessionPins: pinned };
+
+    const again = commandRegistry.setSessionPin(
+      { agentId: "claude-code", sessionId: "raw-1", pinned: true }, deps(snapshot)
+    );
+    assert.deepStrictEqual(again, { status: "ok", noop: true }, "已经钉过了就别重复写盘");
+
+    const off = commandRegistry.setSessionPin(
+      { agentId: "claude-code", sessionId: "raw-1", pinned: false }, deps(snapshot, 2000)
+    );
+    assert.deepStrictEqual(off.commit.sessionPins, {});
+
+    // 本来就没钉过 -> 取消置顶是空操作，不该白写一次盘
+    const unpinned = { ...prefs.getDefaults(), sessionPins: {} };
+    const offNothing = commandRegistry.setSessionPin(
+      { agentId: "claude-code", sessionId: "raw-1", pinned: false }, deps(unpinned)
+    );
+    assert.deepStrictEqual(offNothing, { status: "ok", noop: true });
+  });
+
+  it("脏载荷一律拒绝，一个字节都不写", () => {
+    const snapshot = { ...prefs.getDefaults(), sessionPins: {} };
+    const bad = [
+      undefined,
+      null,
+      "x",
+      [],
+      {},
+      { agentId: "claude-code", sessionId: "s1" },
+      { agentId: "claude-code", sessionId: "s1", pinned: "yes" },
+      { agentId: "claude-code", sessionId: "", pinned: true },
+      { agentId: "claude-code", sessionId: null, pinned: true },
+    ];
+    for (const payload of bad) {
+      const r = commandRegistry.setSessionPin(payload, deps(snapshot));
+      assert.strictEqual(r.status, "error", JSON.stringify(payload));
+      assert.strictEqual(r.commit, undefined);
+    }
+  });
+
+  it("超过上限时留下最近钉的，不会越攒越多", () => {
+    const existing = {};
+    for (let i = 0; i < 200; i += 1) existing[`local|claude-code|s${i}`] = { pinnedAt: i + 1 };
+    const snapshot = { ...prefs.getDefaults(), sessionPins: existing };
+    const r = commandRegistry.setSessionPin(
+      { agentId: "claude-code", sessionId: "newest", pinned: true }, deps(snapshot, 9999)
+    );
+    assert.strictEqual(r.status, "ok");
+    const keys = Object.keys(r.commit.sessionPins);
+    assert.strictEqual(keys.length, 200);
+    assert.ok(r.commit.sessionPins["local|claude-code|newest"]);
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(r.commit.sessionPins, "local|claude-code|s0"),
+      false,
+      "最老的那条被挤掉"
+    );
+  });
+
+  it("sessionPins 这个键本身也要过形状闸门", () => {
+    const deps2 = { snapshot: prefs.getDefaults() };
+    assert.strictEqual(updateRegistry.sessionPins({ "local|claude-code|s1": { pinnedAt: 1 } }, deps2).status, "ok");
+    assert.strictEqual(updateRegistry.sessionPins("nope", deps2).status, "error");
+    assert.strictEqual(updateRegistry.sessionPins([1], deps2).status, "error");
+    assert.strictEqual(updateRegistry.sessionPins({ "local|claude-code|s1": {} }, deps2).status, "error");
+    assert.strictEqual(updateRegistry.sessionPins({ "  ": { pinnedAt: 1 } }, deps2).status, "error");
+  });
+});

@@ -82,6 +82,11 @@ const {
   sanitizeSessionAlias,
   sessionAliasKey,
 } = require("./session-alias");
+const {
+  MAX_SESSION_PINS,
+  normalizeSessionPins,
+  sessionPinKey,
+} = require("./session-pins");
 const { validateShortcutMapShape } = require("./shortcut-actions");
 const { MAX_EDITOR_APP_ENTRIES } = require("./editor-window-visibility");
 const {
@@ -742,6 +747,20 @@ const updateRegistry = {
     }
     return { status: "ok" };
   },
+  // 置顶表：key -> {pinnedAt}。只影响面板列表的排序，没有任何运行副作用。
+  sessionPins(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return { status: "error", message: "sessionPins must be a plain object" };
+    }
+    const normalized = normalizeSessionPins(value);
+    if (Object.keys(normalized).length !== Object.keys(value).length) {
+      return { status: "error", message: "sessionPins must contain valid pin entries" };
+    }
+    if (Object.keys(normalized).length > MAX_SESSION_PINS) {
+      return { status: "error", message: "sessionPins is over the entry limit" };
+    }
+    return { status: "ok" };
+  },
 
   // Phase 3b-swap: per-theme variant selection. NO effect — the runtime switch
   // runs through the `setThemeSelection` command which atomically commits
@@ -1038,6 +1057,55 @@ function getActiveSessionAliasKeys(deps) {
     if (keys && typeof keys[Symbol.iterator] === "function") return new Set(keys);
   } catch {}
   return new Set();
+}
+
+function sessionPinMapEqual(a, b) {
+  const aKeys = Object.keys(a || {});
+  const bKeys = Object.keys(b || {});
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    const av = a[key];
+    const bv = b[key];
+    if (!bv || av.pinnedAt !== bv.pinnedAt) return false;
+  }
+  return true;
+}
+
+/**
+ * 置顶 / 取消置顶一条会话。
+ *
+ * payload 只带 {agentId, sessionId, pinned}——调用方（主进程）已经自己回查过
+ * 身份，不从渲染端接 key。key 由本模块自己算，别处不许拼。
+ * 置顶只影响排序：不拉起进程、不改变发送目标、没有别的副作用。
+ */
+function setSessionPin(payload, deps) {
+  if (!payload || typeof payload !== "object") {
+    return { status: "error", message: "setSessionPin: payload must be an object" };
+  }
+  const { agentId, sessionId, pinned } = payload;
+  if (typeof pinned !== "boolean") {
+    return { status: "error", message: "setSessionPin.pinned must be a boolean" };
+  }
+  const key = sessionPinKey(agentId, sessionId);
+  if (!key) {
+    return { status: "error", message: "setSessionPin.sessionId must be a non-empty string" };
+  }
+
+  const snapshot = (deps && deps.snapshot) || {};
+  const current = normalizeSessionPins(snapshot.sessionPins || {});
+  const next = { ...current };
+  if (pinned) {
+    if (current[key]) return { status: "ok", noop: true };
+    next[key] = { pinnedAt: getCommandNow(deps) };
+  } else if (current[key]) {
+    delete next[key];
+  } else {
+    return { status: "ok", noop: true };
+  }
+
+  const pruned = normalizeSessionPins(next);
+  if (sessionPinMapEqual(pruned, current)) return { status: "ok", noop: true };
+  return { status: "ok", commit: { sessionPins: pruned } };
 }
 
 function setSessionAlias(payload, deps) {
@@ -2651,6 +2719,7 @@ const commandRegistry = {
   setBubbleCategoryEnabled,
   "sessionCleanup.setTriple": setSessionCleanupTriple,
   setSessionAlias,
+  setSessionPin,
   setTextScaleForDisplay,
   setAnimationOverride,
   setSoundOverride,

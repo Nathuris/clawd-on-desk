@@ -76,6 +76,7 @@ function normalizeSession(raw) {
     folder: typeof raw.folder === "string" && raw.folder ? raw.folder : null,
     state: typeof raw.state === "string" && raw.state ? raw.state : null,
     active: raw.active === true,
+    pinned: raw.pinned === true,
   };
 }
 
@@ -100,6 +101,7 @@ function normalizeHistoryRow(raw) {
       : null,
     group: raw.group === "other" ? "other" : "confirmed",
     resumePending: raw.resumePending === true,
+    pinned: raw.pinned === true,
   };
 }
 
@@ -117,6 +119,21 @@ function normalizeQuickState(raw) {
     historyTruncated: Number.isFinite(s.historyTruncated) && s.historyTruncated > 0
       ? Math.floor(s.historyTruncated)
       : 0,
+    // 置顶的那几条（活着的在前、历史的在后），主进程已经从下面两个数组里剔掉了。
+    // kind 决定点它是"选中"还是"续跑"——这两件事绝不能混。
+    // 每条都要把 kind 留下——渲染端靠它分辨「点一下是选中」还是「点一下是续跑」。
+    // 丢了的话历史会话会被当成活着的会话画出来（没有身份的行，点什么都没反应）。
+    // 置顶组里的每一条按定义都是钉着的，所以 pinned 一律补成 true。
+    pinnedItems: Array.isArray(s.pinnedItems)
+      ? s.pinnedItems
+        .map((raw) => {
+          if (!raw || typeof raw !== "object") return null;
+          const isHistory = raw.kind === "history";
+          const item = isHistory ? normalizeHistoryRow(raw) : normalizeSession(raw);
+          return item ? { ...item, kind: isHistory ? "history" : "session", pinned: true } : null;
+        })
+        .filter(Boolean)
+      : [],
     canCreateSession: s.canCreateSession === true,
     // 新建会话落在哪个文件夹：主进程给「显示用短路径」和「最后一段目录名」两份。
     newSessionFolder: typeof s.newSessionFolder === "string" && s.newSessionFolder ? s.newSessionFolder : null,
@@ -397,7 +414,39 @@ function createSessionRow(item) {
 
   row.addEventListener("click", () => handleSessionPick(item.id));
   wrap.appendChild(row);
+  wrap.appendChild(createSessionPinButton("session", item.id, item.pinned));
   return wrap;
+}
+
+// 📌 按钮。它必须是整行按钮的**兄弟节点**——按钮套按钮既是非法结构，点它也会
+// 连着触发整行的点击。点了只置顶/取消置顶：不选中、不收菜单、不碰输入框。
+function createSessionPinButton(kind, ref, pinned) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "quick-session-pin";
+  if (pinned) button.classList.add("is-pinned");
+  const label = t(pinned ? "hudSessionUnpin" : "hudSessionPin");
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.setAttribute("data-pin-kind", kind);
+  button.textContent = "📌";
+  button.addEventListener("click", () => handleTogglePin(kind, ref, pinned));
+  return button;
+}
+
+// 置顶 / 取消置顶。只递"我点的是哪一行"（一个 action id 或一个不透明的
+// historyKey），身份由主进程回查。置顶没有任何运行副作用。
+async function handleTogglePin(kind, ref, pinned) {
+  const payload = kind === "session"
+    ? { target: { kind: "session", sessionId: ref }, pinned: !pinned }
+    : { target: { kind: "history", agentId: ref.agentId, historyKey: ref.historyKey }, pinned: !pinned };
+  let result = null;
+  try {
+    result = await window.sessionHudAPI.setSessionPin(payload);
+  } catch {
+    result = null;
+  }
+  if (!result || result.status !== "ok") showQuickFeedback(t("hudSessionPinFailed"), true);
 }
 
 /* ===== 「最近」那一组：历史会话（点一下 = 重新拉起来接着聊） =====
@@ -490,6 +539,8 @@ function createHistoryRow(row) {
 
   if (!disabled && !busy) button.addEventListener("click", () => handleResumeHistoryRow(row));
   wrap.appendChild(button);
+  // 续跑不了的历史会话照样能置顶——置顶只是排序，跟能不能拉起来没关系
+  wrap.appendChild(createSessionPinButton("history", { agentId: row.agentId, historyKey: row.historyKey }, row.pinned));
   return wrap;
 }
 
@@ -570,6 +621,11 @@ function renderSessionMenu() {
   // 列表能滚了，排好的新会话（占位行）不再需要挤掉一条会话——它只是排在最上面。
   const items = quickState.sessions.slice(0, SESSION_RENDER_LIMIT);
   const nodes = [];
+  // 置顶的那几条排最前面（主进程已经按"先活着的、再历史的"排好，
+  // 组内按钉的时间倒序）。它们已经从下面两个数组里剔掉了，不会画两遍。
+  for (const item of quickState.pinnedItems) {
+    nodes.push(item.kind === "history" ? createHistoryRow(item) : createSessionRow(item));
+  }
   if (quickState.pendingId) nodes.push(createPendingRow());
   for (const item of items) nodes.push(createSessionRow(item));
 
@@ -585,7 +641,8 @@ function renderSessionMenu() {
   // 每次都重建的话滚动位置会被顶回顶部、还会闪一下。
   const signature = JSON.stringify([
     i18nPayload.lang, quickState.pendingId, quickState.targetPending, items,
-    quickState.history, quickState.historyTruncated, [...historyActionState],
+    quickState.pinnedItems, quickState.history, quickState.historyTruncated,
+    [...historyActionState],
   ]);
   if (signature !== sessionScrollSignature) {
     const scrollTop = sessionScrollEl.scrollTop;

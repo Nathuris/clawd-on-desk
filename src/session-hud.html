@@ -305,6 +305,30 @@ body.settings-menu-open .quick-session-list { height: 248px; }
 }
 .quick-session-row > .quick-session-item { flex: 1 1 auto; min-width: 0; }
 
+/* 📌：整行按钮右边并排的置顶开关。没置顶的时候藏着，指到这一行才露出来——
+   300px 宽的列表里每行都挂个图钉太吵。已置顶的常显（在置顶组里一眼能看出
+   为什么它排在最上面）。
+   注意 pointer-events：看不见的时候不能吃点击，否则点到行尾会莫名其妙置顶。 */
+.quick-session-pin {
+  flex: 0 0 20px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+}
+.quick-session-row:hover .quick-session-pin,
+.quick-session-pin.is-pinned,
+.quick-session-pin:focus-visible { opacity: 1; pointer-events: auto; }
+.quick-session-pin:hover { background: rgba(127, 127, 127, 0.18); }
+.quick-session-pin.is-pinned { color: var(--accent); }
+.quick-session-pin:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 /* ===== 「最近」那一组（历史会话） =====
    线下面都是已经结束的会话：点一下是「重新拉起来接着聊」，不是选中它。
    它们永远没有高亮底，也永远不进状态行——那两处才是「消息会发到这里」的标记。 */

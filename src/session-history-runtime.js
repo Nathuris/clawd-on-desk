@@ -3,6 +3,7 @@
 const {
   loadResumableSessionHistoryWithStats,
   resolveResumeTarget,
+  resolveHistoryIdentity,
 } = require("./session-history-loader");
 
 const RESUME_CONFIRMATION_MS = 30_000;
@@ -99,7 +100,13 @@ function createSessionHistoryRuntime({ getSessions, isAgentEnabled, launchClaude
     return entry.promise;
   }
 
-  return { getHistory, getHistoryWithStats, resume };
+  // 面板置顶要用：把一条历史行的不透明 key 还原成"哪个 agent 的哪个会话"。
+  // 走同一个 historyOptions，免得两处读的存储目录哪天对不上。
+  function resolveIdentity(agentId, historyKey) {
+    return resolveHistoryIdentity(agentId, historyKey, historyOptions);
+  }
+
+  return { getHistory, getHistoryWithStats, resume, resolveIdentity };
 }
 
 module.exports = { createSessionHistoryRuntime, RESUME_CONFIRMATION_MS };

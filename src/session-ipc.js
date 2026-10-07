@@ -299,6 +299,45 @@ function registerSessionIpc(options = {}) {
       { agentId: payload.agentId, historyKey: payload.historyKey },
     ]);
   });
+  // 面板里点 📌：置顶 / 取消置顶一条会话。只影响面板列表的排序，没有运行副作用，
+  // 但载荷仍然走和别的 HUD 通道一样的严格形状闸门：target 只认两种形状，
+  // 而且渲染端给什么标识都只当"它指的是哪一行"，真正的身份由主进程回查。
+  handle("session-hud:set-session-pin", (event, payload) => {
+    const rejected = rejectUntrustedHudEvent(event);
+    if (rejected) return rejected;
+    const keys = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? Object.keys(payload).sort()
+      : [];
+    if (keys.length !== 2 || keys[0] !== "pinned" || keys[1] !== "target") {
+      return { status: "invalid" };
+    }
+    if (typeof payload.pinned !== "boolean") return { status: "invalid" };
+    const target = payload.target;
+    if (!target || typeof target !== "object" || Array.isArray(target)) {
+      return { status: "invalid" };
+    }
+    const targetKeys = Object.keys(target).sort();
+    if (target.kind === "session") {
+      if (targetKeys.length !== 2 || targetKeys[0] !== "kind" || targetKeys[1] !== "sessionId") {
+        return { status: "invalid" };
+      }
+      if (typeof target.sessionId !== "string" || !target.sessionId) return { status: "invalid" };
+    } else if (target.kind === "history") {
+      if (targetKeys.length !== 3
+        || targetKeys[0] !== "agentId" || targetKeys[1] !== "historyKey" || targetKeys[2] !== "kind") {
+        return { status: "invalid" };
+      }
+      if (typeof target.agentId !== "string" || !target.agentId) return { status: "invalid" };
+      if (typeof target.historyKey !== "string" || !/^[a-f0-9]{32}$/.test(target.historyKey)) {
+        return { status: "invalid" };
+      }
+    } else {
+      return { status: "invalid" };
+    }
+    return hudAction(event, options.quickSetSessionPin, [
+      { target: { ...target }, pinned: payload.pinned },
+    ]);
+  });
   // 开/关哪个菜单（点状态行 = 会话菜单，点齿轮 = 设置菜单）：只影响卡片高度与
   // 自动收起（hold），无副作用能力。menu 只认 null / "session" / "settings"。
   handle("session-hud:set-menu-open", (event, payload) => {

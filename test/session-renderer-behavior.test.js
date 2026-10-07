@@ -273,6 +273,9 @@ function hudTranslations(overrides = {}) {
     sessionMinAgo: "{n}m ago",
     sessionHrAgo: "{n}h ago",
     sessionHudElapsedSec: "{n}s ago",
+    hudSessionPin: "Pin to top",
+    hudSessionUnpin: "Unpin",
+    hudSessionPinFailed: "Could not change the pin",
     hudHistorySection: "Recent",
     hudHistoryEnded: "Ended",
     hudHistoryInterrupted: "Interrupted last time",
@@ -351,6 +354,9 @@ const HUD_ZH_TRANSLATIONS = hudTranslations({
   sessionMinAgo: "{n}分钟前",
   sessionHrAgo: "{n}小时前",
   sessionHudElapsedSec: "{n} 秒前",
+  hudSessionPin: "置顶",
+  hudSessionUnpin: "取消置顶",
+  hudSessionPinFailed: "置顶没改成功",
   hudHistorySection: "最近",
   hudHistoryEnded: "已结束",
   hudHistoryInterrupted: "上次没正常收尾",
@@ -488,6 +494,7 @@ async function loadHud(options = {}) {
     setNewSessionOption: [],
     applyEffort: [],
     resumeSession: [],
+    setSessionPin: [],
     cancelPendingSession: 0,
     setAttachments: [],
     pickFiles: 0,
@@ -565,6 +572,11 @@ async function loadHud(options = {}) {
       if (options.resumeSessionThrows) throw new Error("resume failed");
       // 用例可以中途改这个值，模拟"已经跑起来了 / 找不到记录 / 拉不起来"
       return api.resumeSessionResult || { status: "submitted", retryAt: 1 };
+    },
+    setSessionPin: async (payload) => {
+      calls.setSessionPin.push(payload);
+      if (options.setSessionPinThrows) throw new Error("pin failed");
+      return api.setSessionPinResult || { status: "ok" };
     },
   };
 
@@ -1519,6 +1531,157 @@ test("quick panel: 历史被截断时明说还有多少条，不许偷偷少显�
 
   pushHistory(hud, [historyRow()], { historyTruncated: 7 });
   assert.strictEqual(hud.one("quick-session-more").textContent, "还有 7 条更早的会话");
+});
+
+// ── 会话置顶 ─────────────────────────────────────────────────────────────
+// 置顶只改变列表的排序，没有任何运行副作用。最要紧的是：点 📌 不能顺带把那一行
+// 选中（那是"消息会发到这里"），也不能把某条历史会话变成发送目标。
+
+test("quick panel: 置顶的排在最前面，📌 只置顶不选中", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    menuOpen: "session", targetId: "s2", targetTitle: "S2",
+    sessions: [
+      { id: "s1", title: "S1", folder: "a", state: "idle", active: false },
+      { id: "s2", title: "S2", folder: "b", state: "working", active: true },
+    ],
+    pinnedItems: [
+      { kind: "session", id: "s3", title: "钉住的", folder: "c", state: "idle", active: false, pinned: true },
+    ],
+  });
+
+  const scroll = hud.one("quick-session-scroll");
+  assert.deepStrictEqual(
+    scroll.children.map((row) => row.children[0].getAttribute("data-session-id")),
+    ["s3", "s1", "s2"],
+    "置顶的排最前面，其余保持原顺序"
+  );
+  assert.strictEqual(hud.find("quick-session-item").filter(
+    (row) => row.getAttribute("data-session-id") === "s3").length, 1,
+  "置顶的那条不能同时出现在下面，画两遍就点错了");
+
+  // 置顶行上的 📌 显示为已钉上
+  const pinnedRow = scroll.children[0];
+  const pin = byClass(pinnedRow, "quick-session-pin")[0];
+  assert.ok(pin, "每一行右边都要有置顶开关");
+  assert.ok(pin.classList.contains("is-pinned"));
+
+  // 点 📌 = 取消置顶：只调 setSessionPin，绝不当成选中
+  await pin.dispatch("click");
+  await flush();
+  assert.strictEqual(hud.calls.setSessionPin.length, 1);
+  assert.strictEqual(hud.calls.setSessionPin[0].target.kind, "session");
+  assert.strictEqual(hud.calls.setSessionPin[0].target.sessionId, "s3");
+  assert.strictEqual(hud.calls.setSessionPin[0].pinned, false);
+  assert.deepStrictEqual(
+    Object.keys(hud.calls.setSessionPin[0].target).sort(),
+    ["kind", "sessionId"],
+    "只递「点的是哪一行」，别的字段一概不带"
+  );
+  assert.deepStrictEqual(hud.calls.selectSession, [], "点 📌 不能顺带选中这一行");
+  assert.deepStrictEqual(hud.calls.sendPrompt, []);
+});
+
+test("quick panel: 置顶组里的历史会话仍然按历史会话画（别再当成活的）", async () => {
+  // 这条是真机上踩出来的：主进程给置顶条目带了 kind，渲染端整理数据时把它丢了，
+  // 结果置顶组里的历史会话被当成"活着的会话"画出来——一行没有身份的行，
+  // 点它的 📌 带不出任何标识，主进程只能拒掉。
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    menuOpen: "session", canCreateSession: true,
+    sessions: [{ id: "s1", title: "活着的", folder: "a", state: "idle", active: false }],
+    pinnedItems: [
+      { kind: "session", id: "s9", title: "钉住的活会话", folder: "b", state: "working", active: false },
+      { kind: "history", ...historyRow({ title: "钉住的历史会话", historyKey: "b".repeat(32) }) },
+    ],
+  });
+
+  const scroll = hud.one("quick-session-scroll");
+  const [pinnedLive, pinnedHistory] = scroll.children;
+
+  // 活的还是活的：整行可点、带 data-session-id
+  assert.strictEqual(pinnedLive.children[0].getAttribute("data-session-id"), "s9");
+  assert.ok(!pinnedLive.children[0].classList.contains("quick-session-history"));
+
+  // 历史还是历史：不冒充会话行，带 data-history-key，也不会有 data-session-id
+  assert.ok(
+    pinnedHistory.children[0].classList.contains("quick-session-history"),
+    "置顶组里的历史会话必须仍然按历史会话画"
+  );
+  assert.strictEqual(
+    pinnedHistory.children[0].getAttribute("data-history-key"),
+    "b".repeat(32)
+  );
+  assert.strictEqual(pinnedHistory.children[0].getAttribute("data-session-id"), null);
+  assert.match(
+    byClass(pinnedHistory.children[0], "quick-session-meta")[0].textContent,
+    /已结束/
+  );
+
+  // 点它的 📌：带的是 history 身份，而不是一个空 session
+  await byClass(pinnedHistory, "quick-session-pin")[0].dispatch("click");
+  await flush();
+  assert.strictEqual(hud.calls.setSessionPin.length, 1);
+  assert.strictEqual(hud.calls.setSessionPin[0].target.kind, "history");
+  assert.strictEqual(hud.calls.setSessionPin[0].target.historyKey, "b".repeat(32));
+  assert.strictEqual(hud.calls.setSessionPin[0].target.agentId, "claude-code");
+  assert.strictEqual(hud.calls.setSessionPin[0].pinned, false, "它已经钉着，点一下是取消");
+  assert.deepStrictEqual(hud.calls.selectSession, [], "历史行绝不能被当成发送目标");
+  assert.deepStrictEqual(hud.calls.resumeSession, []);
+});
+
+test("quick panel: 置顶组里的 📌 都是「已钉上」的样子", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    menuOpen: "session",
+    pinnedItems: [
+      { kind: "session", id: "s9", title: "钉住的", folder: "b", state: "idle", active: false },
+    ],
+  });
+  const pin = byClass(hud.one("quick-session-row"), "quick-session-pin")[0];
+  assert.ok(pin.classList.contains("is-pinned"), "主进程已经剔过一遍，置顶组里的必然是钉着的");
+});
+
+test("quick panel: 给没置顶的行点 📌，请求的是置顶", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    menuOpen: "session",
+    sessions: [{ id: "s1", title: "S1", folder: "a", state: "idle", active: false }],
+  });
+  const pin = byClass(hud.one("quick-session-row"), "quick-session-pin")[0];
+  assert.ok(!pin.classList.contains("is-pinned"));
+  await pin.dispatch("click");
+  await flush();
+  assert.strictEqual(hud.calls.setSessionPin[0].target.kind, "session");
+  assert.strictEqual(hud.calls.setSessionPin[0].target.sessionId, "s1");
+  assert.strictEqual(hud.calls.setSessionPin[0].pinned, true);
+});
+
+test("quick panel: 历史会话也能置顶，点 📌 不会把它续跑起来", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  pushHistory(hud, [historyRow()]);
+  const pin = byClass(hud.one("quick-session-history").parentNode, "quick-session-pin")[0];
+  assert.ok(pin, "历史行也要有置顶开关");
+  await pin.dispatch("click");
+  await flush();
+  assert.strictEqual(hud.calls.setSessionPin[0].target.kind, "history");
+  assert.strictEqual(hud.calls.setSessionPin[0].target.agentId, "claude-code");
+  assert.strictEqual(hud.calls.setSessionPin[0].target.historyKey, HISTORY_KEY);
+  assert.strictEqual(hud.calls.setSessionPin[0].pinned, true);
+  assert.deepStrictEqual(hud.calls.resumeSession, [], "点 📌 不能顺带把它拉起来");
+  assert.deepStrictEqual(hud.calls.selectSession, []);
+});
+
+test("quick panel: 置顶失败如实说，不装作改好了", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  hud.pushQuickState({
+    menuOpen: "session",
+    sessions: [{ id: "s1", title: "S1", folder: "a", state: "idle", active: false }],
+  });
+  hud.api.setSessionPinResult = { status: "error", reason: "store-failed" };
+  await byClass(hud.one("quick-session-row"), "quick-session-pin")[0].dispatch("click");
+  await flush();
+  assert.match(hud.one("quick-status-text").textContent, /置顶没改成功/);
 });
 
 test("quick panel: 目标是不成信儿的占位时，状态行说明它在等第一句话", async () => {

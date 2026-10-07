@@ -51,6 +51,7 @@ describe("prefs.getDefaults", () => {
     assert.notStrictEqual(a.petMouthAccessory, b.petMouthAccessory);
     assert.notStrictEqual(a.shortcuts, b.shortcuts);
     assert.notStrictEqual(a.sessionAliases, b.sessionAliases);
+    assert.notStrictEqual(a.sessionPins, b.sessionPins);
     assert.notStrictEqual(a.tgApproval, b.tgApproval);
     // Mutating one shouldn't affect the other
     a.agents["claude-code"].enabled = false;
@@ -1023,6 +1024,38 @@ describe("prefs.validate", () => {
   it("sessionAliases falls back to defaults when not an object", () => {
     assert.deepStrictEqual(prefs.validate({ sessionAliases: "nope" }).sessionAliases, {});
     assert.deepStrictEqual(prefs.validate({ sessionAliases: [1, 2] }).sessionAliases, {});
+  });
+
+  it("sessionPins 归一化：留下有效的，丢掉脏的", () => {
+    const v = prefs.validate({
+      sessionPins: {
+        "local|claude-code|s1": { pinnedAt: 100 },
+        "local|claude-code|no-time": {},
+        "local|claude-code|zero": { pinnedAt: 0 },
+        "local|claude-code|text": { pinnedAt: "yesterday" },
+        "local|claude-code|array": [1],
+        "  ": { pinnedAt: 100 },
+      },
+    });
+    assert.deepStrictEqual(v.sessionPins, { "local|claude-code|s1": { pinnedAt: 100 } });
+  });
+
+  it("sessionPins 落回默认值，老配置文件天然补上这个键", () => {
+    assert.deepStrictEqual(prefs.validate({ sessionPins: "nope" }).sessionPins, {});
+    assert.deepStrictEqual(prefs.validate({ sessionPins: [1, 2] }).sessionPins, {});
+    assert.deepStrictEqual(prefs.validate({}).sessionPins, {}, "老文件里没有这个键也不出错");
+  });
+
+  it("sessionPins 超过上限时只留最近钉的那些，且不把用户其余的置顶搞乱", () => {
+    const many = {};
+    for (let i = 0; i < 250; i += 1) many[`local|claude-code|s${i}`] = { pinnedAt: i + 1 };
+    const v = prefs.validate({ sessionPins: many });
+    const keys = Object.keys(v.sessionPins);
+    assert.strictEqual(keys.length, 200);
+    // 最新钉的那条（pinnedAt 最大）一定在
+    assert.ok(v.sessionPins["local|claude-code|s249"]);
+    // 最老的那条被挤掉
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(v.sessionPins, "local|claude-code|s0"), false);
   });
 
   it("drops legacy workspaceAliases because they are no longer in the schema", () => {
