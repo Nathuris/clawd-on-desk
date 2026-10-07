@@ -277,6 +277,28 @@ function registerSessionIpc(options = {}) {
     if (!sessionId) return { status: "error", message: "empty session id" };
     return hudAction(event, options.quickSelectSession, [sessionId]);
   });
+  // 面板里点一条历史会话 = 把那个会话重新拉起来接着聊。载荷只有 agent 与不透明
+  // 的 historyKey（和 Dashboard 的 dashboard:resume-session 同一套取舍）：项目
+  // 目录、profile 都由主进程回查，渲染端指定不了。
+  // 这里**不带**权限模式参数——续跑只用普通权限，「跳过确认」仍然只走宠物菜单
+  // 里那个有确认弹窗的入口。
+  handle("session-hud:resume-session", (event, payload) => {
+    const rejected = rejectUntrustedHudEvent(event);
+    if (rejected) return rejected;
+    const keys = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? Object.keys(payload).sort()
+      : [];
+    if (keys.length !== 2 || keys[0] !== "agentId" || keys[1] !== "historyKey") {
+      return { status: "invalid" };
+    }
+    if (typeof payload.agentId !== "string" || !payload.agentId) return { status: "invalid" };
+    if (typeof payload.historyKey !== "string" || !/^[a-f0-9]{32}$/.test(payload.historyKey)) {
+      return { status: "invalid" };
+    }
+    return hudAction(event, options.quickResumeSession, [
+      { agentId: payload.agentId, historyKey: payload.historyKey },
+    ]);
+  });
   // 开/关哪个菜单（点状态行 = 会话菜单，点齿轮 = 设置菜单）：只影响卡片高度与
   // 自动收起（hold），无副作用能力。menu 只认 null / "session" / "settings"。
   handle("session-hud:set-menu-open", (event, payload) => {

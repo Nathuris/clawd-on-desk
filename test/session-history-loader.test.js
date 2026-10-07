@@ -12,7 +12,9 @@ const {
   getClaudeProjectsDir,
   probeTranscript,
   loadResumableSessionHistory,
+  loadResumableSessionHistoryWithStats,
   resolveResumeTarget,
+  resolveHistoryIdentity,
   clearTitleExtractionCache,
 } = require("../src/session-history-loader");
 const {
@@ -854,6 +856,61 @@ describe("session history loader", () => {
         null,
         "a deleted project folder must not be relaunched into",
       );
+    });
+  });
+
+  describe("truncation stats", () => {
+    it("returns the same rows as before, plus how many the limit left out", () => {
+      for (let i = 0; i < 5; i += 1) {
+        record(`s${i}`, T0 + i * 1000);
+        writeTranscript(`s${i}`);
+      }
+      const stats = loadResumableSessionHistoryWithStats(loadOpts({ limit: 2 }));
+      assert.deepEqual(stats.rows, loadResumableSessionHistory(loadOpts({ limit: 2 })));
+      assert.equal(stats.rows.filter((row) => row.group === "confirmed").length, 2);
+      assert.equal(stats.truncated, 3, "要如实说还有 3 条没列出来");
+
+      // 没截断时是 0，不是 undefined——面板那边按数字直接渲染
+      assert.equal(loadResumableSessionHistoryWithStats(loadOpts({ limit: 25 })).truncated, 0);
+    });
+  });
+
+  describe("history identity resolution (置顶用)", () => {
+    it("从 agent 与不透明 key 还原出是哪个会话", () => {
+      const recorded = record("pinned", T0);
+      assert.deepEqual(
+        resolveHistoryIdentity("claude-code", recorded.record.historyKey, loadOpts()),
+        {
+          agentId: "claude-code",
+          sessionId: "pinned",
+          historyKey: recorded.record.historyKey,
+        },
+      );
+    });
+
+    it("项目文件夹没了也照样认得出来（置顶只是排序，不要求能续跑）", () => {
+      const recorded = record("gone", T0);
+      fs.rmSync(projectCwd, { recursive: true, force: true });
+      // 续跑那条路会拒绝（上面一条用例钉着），但置顶这条路必须还认得出来
+      assert.equal(resolveResumeTarget("claude-code", recorded.record.historyKey, loadOpts()), null);
+      assert.deepEqual(
+        resolveHistoryIdentity("claude-code", recorded.record.historyKey, loadOpts()),
+        {
+          agentId: "claude-code",
+          sessionId: "gone",
+          historyKey: recorded.record.historyKey,
+        },
+      );
+    });
+
+    it("认不出的一律给 null，绝不错认成别的会话", () => {
+      const recorded = record("pinned", T0);
+      assert.equal(resolveHistoryIdentity("claude-code", "0".repeat(32), loadOpts()), null);
+      assert.equal(resolveHistoryIdentity("claude-code", "not-a-key", loadOpts()), null);
+      assert.equal(resolveHistoryIdentity("codex", recorded.record.historyKey, loadOpts()), null);
+      assert.equal(resolveHistoryIdentity("", recorded.record.historyKey, loadOpts()), null);
+      assert.equal(resolveHistoryIdentity(null, recorded.record.historyKey, loadOpts()), null);
+      assert.equal(resolveHistoryIdentity("claude-code", null, loadOpts()), null);
     });
   });
 });

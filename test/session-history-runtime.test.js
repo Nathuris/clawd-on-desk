@@ -150,4 +150,11 @@ describe("session history resume owner", () => {
     assert.deepEqual(launches[0][3], { kind: "default", configDir: null });
     assert.deepEqual(runtime.getHistory().map((row) => row.resumePending), [true, true]);
   });
+
+  it("带统计的那个入口：行完全一样，另外告诉面板截掉了多少条", () => {
+    const stats = runtime.getHistoryWithStats();
+    assert.deepEqual(stats.rows, runtime.getHistory(), "两条入口的行必须一致");
+    assert.equal(typeof stats.truncated, "number");
+    assert.equal(stats.truncated, 0, "默认 limit 25，一条记录不会被截");
+  });
 });

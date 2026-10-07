@@ -379,7 +379,10 @@ describe("卡片几何（只剩状态行 + 输入行）", () => {
     // 主卡片 66（挂附件 94）；菜单卡片浮在上面，中间隔 6px。
     assert.strictEqual(QUICK_ATTACH_ROW.height, 24);
     assert.strictEqual(QUICK_ATTACH_EXTRA, 24 + 4);
-    assert.strictEqual(QUICK_MENU_CARD.session, 178 + 6 + 6 + 2);
+    // 会话菜单的列表区 208 = 滚动区 148（看得见 5 条：5×28 + 行距 4×2）
+    // + 间距 2 + 底部固定两行 58（新建 28 + 选文件夹 28 + 行距 2）
+    assert.strictEqual(QUICK_MENU_CARD.session, 5 * 28 + 4 * 2 + 2 + 2 * 28 + 2 + 6 + 6 + 2);
+    assert.strictEqual(QUICK_MENU_CARD.session, 208 + 6 + 6 + 2);
     assert.strictEqual(QUICK_MENU_CARD.settings, 248 + 6 + 6 + 2);
     assert.strictEqual(QUICK_MENU_GAP, 6);
 
@@ -418,8 +421,8 @@ describe("卡片几何（只剩状态行 + 输入行）", () => {
     assert.ok(opened.contentBounds.y < collapsed.contentBounds.y);
     assert.strictEqual(
       quickCardHeight("session", false) - QUICK_CARD.height,
-      6 + 192,
-      "会话菜单卡片 192（列表区 178 + 内边距 12 + 边框 2）＋ 6px 间距"
+      6 + 222,
+      "会话菜单卡片 222（列表区 208 + 内边距 12 + 边框 2）＋ 6px 间距"
     );
     assert.strictEqual(
       quickCardHeight("settings", false) - QUICK_CARD.height,

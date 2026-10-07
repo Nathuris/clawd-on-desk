@@ -201,6 +201,7 @@ const { focusCodexThreadTarget } = require("./session-focus-handoff");
 const { isSessionInProgress } = require("./state-session-snapshot");
 const { restoreSessionsFromRecoveryLeases } = require("./session-recovery-loader");
 const { createSessionHistoryRuntime } = require("./session-history-runtime");
+const { createQuickHistoryCache } = require("./quick-history-cache");
 const { getAllAgents, getAgent } = require("../agents/registry");
 const { getAgentIconUrl } = require("./state-agent-icons");
 const { stripInheritedClaudeSessionEnv } = require("./claude-session-env");
@@ -992,6 +993,13 @@ let quickSessionIdsBeforeLaunch = null;
 // 认领的兜底时限：hooks 没上报（或那个会话一开就退）时，占位不能永远钉着目标。
 const PENDING_ADOPT_TIMEOUT_MS = 20000;
 
+// 面板会话菜单里「最近」那一组（历史会话）。读盘只在菜单打开时发生一次，
+// TTL 之内复用——状态投影每次会话动静都会重算，不能挂在它上面。
+// 在 runtime 建好之后赋值（见本文件下面的 createSessionHistoryRuntime）。
+let quickHistoryCache = null;
+// 面板里最多列这么多条历史（再多也滚不完，还拖慢每次重建）。
+const QUICK_HISTORY_MAX_ROWS = 20;
+
 function homeDir() {
   try { return require("os").homedir(); } catch { return null; }
 }
@@ -1041,6 +1049,39 @@ function listQuickSessions() {
     .filter(Boolean);
 }
 
+// 面板里「最近」那一组的一行。只带展示要用的字段 + 一个不透明的 historyKey：
+// 完整的 session id、cwd 全路径、transcript 路径都不进 IPC（loader 本来就刻意
+// 不带路径，这里也别加回来）。续跑时渲染端只把这个 key 递回来，主进程自己回查。
+function projectQuickHistoryRow(row) {
+  return {
+    historyKey: row.historyKey,
+    agentId: row.agentId,
+    title: row.title || null,
+    folder: row.cwd ? path.basename(row.cwd) : null,
+    // 一小截 id，给同名标题的会话一个区分线索
+    sessionTag: typeof row.sessionId === "string" ? row.sessionId.slice(0, 8) : null,
+    lastState: row.lastState || null,
+    lastEventAt: Number.isFinite(row.lastEventAt) ? row.lastEventAt : null,
+    interrupted: row.interrupted === true,
+    // true 有记录 / false 确认没了 / null 说不准——三种都要如实传下去
+    transcriptPresent: row.transcriptPresent === true
+      ? true
+      : (row.transcriptPresent === false ? false : null),
+    resumeDisabledReason: row.resumeDisabledReason || null,
+    group: row.group === "other" ? "other" : "confirmed",
+    resumePending: row.resumePending === true,
+  };
+}
+
+function quickHistoryProjection() {
+  const cached = quickHistoryCache ? quickHistoryCache.peek() : null;
+  if (!cached) return { rows: [], truncated: 0 };
+  const rows = cached.rows.slice(0, QUICK_HISTORY_MAX_ROWS).map(projectQuickHistoryRow);
+  // 两处截断都要如实报出来：读盘那一层的（loader 的 limit）和面板这一层的。
+  const truncated = cached.truncated + Math.max(0, cached.rows.length - QUICK_HISTORY_MAX_ROWS);
+  return { rows, truncated };
+}
+
 // 最近活动的那个真实会话（不考虑面板里排好的「新会话」占位）。
 // 「新会话开在哪个目录」要跟着它走，所以不能受占位影响。
 function resolveQuickSessionTarget() {
@@ -1080,6 +1121,7 @@ function buildQuickSendState() {
   const target = entry && entry.kind === "session" ? entry.session : null;
   const pending = quickPendingNewSession;
   const newSessionFolder = resolveQuickNewSessionFolder();
+  const history = quickHistoryProjection();
   return {
     targetId: target ? target.id : null,
     targetTitle: target ? target.displayTitle : null,
@@ -1100,6 +1142,11 @@ function buildQuickSendState() {
       state: item.state,
       active: !!target && item.id === target.id,
     })),
+    // 历史会话（「最近」那一组）。点一下 = 让 Claude Code 把那个会话重新拉起来
+    // 接着聊，不是"往那儿发消息"——它现在根本没在跑。
+    history: history.rows,
+    // 还有多少条更早的没列出来（读盘那层 + 面板这层），面板要如实说，不许静默截断
+    historyTruncated: history.truncated,
     canCreateSession: process.platform === "darwin",
     // 新建会话的落地目录：短路径给「选择文件夹」那一行的第二行小字，
     // 目录名给「新建会话」那一行，让用户点之前就知道会开在哪儿。
@@ -5338,9 +5385,35 @@ function quickSetMenuOpen(menu) {
   if (!_sessionHud || typeof _sessionHud.setMenuOpen !== "function") {
     return { status: "error", reason: "quick-panel-unavailable" };
   }
-  _sessionHud.setMenuOpen(menu === "session" || menu === "settings" ? menu : null);
+  const next = menu === "session" || menu === "settings" ? menu : null;
+  _sessionHud.setMenuOpen(next);
   pushQuickState();
+  // 会话菜单要用历史会话，而历史是从磁盘读的。只有在这儿（真的打开菜单）才
+  // 去读一次，读完再推一次状态——TTL 之内是纯内存的，不会抖。
+  if (next === "session" && quickHistoryCache) {
+    quickHistoryCache.get({})
+      .then(() => pushQuickState())
+      .catch(() => {});
+  }
   return { status: "ok" };
+}
+
+// 面板里点一条历史会话 = 把那个会话重新拉起来接着聊（和 Dashboard 上是同一件事，
+// 走同一个 runtime：agent 开关、去重、30 秒确认窗都一样）。
+// 注意这里**不带**权限模式参数：从面板续跑只用普通权限，"跳过确认"那条路仍然
+// 只走宠物菜单里那个有确认弹窗的入口。
+async function quickResumeSession(payload) {
+  if (!sessionHistoryRuntime) return { status: "error", reason: "unavailable" };
+  const result = await sessionHistoryRuntime.resume(payload);
+  // 刚提交过的会话可能马上就活过来：历史列表重读一次再推（旧那份先留着，
+  // 读完才推，免得列表闪一下空）。重读之后那行会带上 resumePending。
+  if (quickHistoryCache) {
+    quickHistoryCache.invalidate();
+    quickHistoryCache.get({})
+      .then(() => pushQuickState())
+      .catch(() => {});
+  }
+  return result;
 }
 
 function quickSetClickThrough(through) {
@@ -5374,6 +5447,13 @@ const sessionHistoryRuntime = createSessionHistoryRuntime({
   ),
 });
 
+// 面板要用的那份历史，走 TTL 缓存：读盘只在会话菜单打开时发生一次。
+// Dashboard 走的是 sessionHistoryRuntime.getHistory()，不经过这里（两边共用
+// 同一个 runtime 实例，续跑去重表是共享的——这是好事，不会重复拉两个进程）。
+quickHistoryCache = createQuickHistoryCache({
+  load: () => sessionHistoryRuntime.getHistoryWithStats(),
+});
+
 registerSessionIpc({
   ipcMain,
   getSessionSnapshot: () => _state.buildSessionSnapshot(),
@@ -5395,6 +5475,7 @@ registerSessionIpc({
   quickSavePastedFile,
   quickSetNewSessionOption,
   quickApplyEffort,
+  quickResumeSession,
   quickSetMenuOpen,
   quickSetHold,
   quickSetAttachments,

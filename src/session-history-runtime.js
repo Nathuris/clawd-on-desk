@@ -1,6 +1,9 @@
 "use strict";
 
-const { loadResumableSessionHistory, resolveResumeTarget } = require("./session-history-loader");
+const {
+  loadResumableSessionHistoryWithStats,
+  resolveResumeTarget,
+} = require("./session-history-loader");
 
 const RESUME_CONFIRMATION_MS = 30_000;
 
@@ -26,18 +29,30 @@ function createSessionHistoryRuntime({ getSessions, isAgentEnabled, launchClaude
     return ids;
   }
 
-  function getHistory() {
+  function annotate(rows) {
+    return rows.map((row) => {
+      // Live state currently identifies local Claude sessions by raw id,
+      // not by CLAUDE_CONFIG_DIR. Treat every profile row with that raw id
+      // as one conservative launch unit so two Dashboard clicks cannot
+      // create processes that immediately collapse into the same live key.
+      const pending = launches.get(row.historyKey)
+        || [...launches.values()].find((entry) => entry.sessionId === row.sessionId);
+      return { ...row, resumePending: !!pending, resumeRetryAt: pending?.retryAt || null };
+    });
+  }
+
+  // 面板要比 Dashboard 多知道一件事：有多少条被 limit 截掉了（好如实说
+  // 「还有 N 条更早的」），所以另开一个带统计的入口，getHistory 保持原样。
+  function getHistoryWithStats() {
     const activeRawSessionIds = activeIds();
-    return loadResumableSessionHistory({ ...historyOptions, isAgentEnabled, activeRawSessionIds })
-      .map((row) => {
-        // Live state currently identifies local Claude sessions by raw id,
-        // not by CLAUDE_CONFIG_DIR. Treat every profile row with that raw id
-        // as one conservative launch unit so two Dashboard clicks cannot
-        // create processes that immediately collapse into the same live key.
-        const pending = launches.get(row.historyKey)
-          || [...launches.values()].find((entry) => entry.sessionId === row.sessionId);
-        return { ...row, resumePending: !!pending, resumeRetryAt: pending?.retryAt || null };
-      });
+    const { rows, truncated } = loadResumableSessionHistoryWithStats({
+      ...historyOptions, isAgentEnabled, activeRawSessionIds,
+    });
+    return { rows: annotate(rows), truncated };
+  }
+
+  function getHistory() {
+    return getHistoryWithStats().rows;
   }
 
   async function resume({ agentId, historyKey }) {
@@ -84,7 +99,7 @@ function createSessionHistoryRuntime({ getSessions, isAgentEnabled, launchClaude
     return entry.promise;
   }
 
-  return { getHistory, resume };
+  return { getHistory, getHistoryWithStats, resume };
 }
 
 module.exports = { createSessionHistoryRuntime, RESUME_CONFIRMATION_MS };

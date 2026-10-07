@@ -48,6 +48,9 @@ contextBridge.exposeInMainWorld("sessionHudAPI", {
     ipcRenderer.invoke("session-hud:set-new-session-option", { key, value }),
   // 把强度应用到当前目标（正在跑的会话会被送一条官方 /effort 命令）。
   applyEffort: (level) => ipcRenderer.invoke("session-hud:apply-effort", { level }),
+  // 点一条历史会话 = 把那个会话重新拉起来接着聊（只递 agent 与不透明的 key，
+  // 项目目录由主进程回查）。
+  resumeSession: (payload) => ipcRenderer.invoke("session-hud:resume-session", payload),
   // 指针进出卡片：卡片外的透明区放行点击（单向、高频，用 send）。
   setClickThrough: (through) => ipcRenderer.send("session-hud:set-click-through", { through: !!through }),
   setHold: (reason, held) => ipcRenderer.send("session-hud:set-hold", { reason, held }),

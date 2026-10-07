@@ -364,19 +364,39 @@ describe("面板窗口尺寸：主进程常量与 CSS 一致", () => {
   });
 
   it("菜单卡片的列表区与卡片高度两侧一致", () => {
-    assert.deepStrictEqual(hudTest.QUICK_MENU_CARD, { width: 300, session: 192, settings: 262 });
+    assert.deepStrictEqual(hudTest.QUICK_MENU_CARD, { width: 300, session: 222, settings: 262 });
     assert.strictEqual(hudTest.QUICK_MENU_GAP, 6);
-    assert.match(sessionHudHtml, /body\.session-menu-open \.quick-menu-card \{ height: 192px; \}/);
+    assert.match(sessionHudHtml, /body\.session-menu-open \.quick-menu-card \{ height: 222px; \}/);
     assert.match(sessionHudHtml, /body\.settings-menu-open \.quick-menu-card \{ height: 262px; \}/);
-    assert.match(sessionHudHtml, /body\.session-menu-open \.quick-session-list \{ height: 178px; \}/);
+    assert.match(sessionHudHtml, /body\.session-menu-open \.quick-session-list \{ height: 208px; \}/);
     assert.match(sessionHudHtml, /body\.settings-menu-open \.quick-session-list \{ height: 248px; \}/);
     assert.match(sessionHudHtml, /\.quick-session-item \{[\s\S]*?height: 28px;[\s\S]*?\}/);
     assert.match(sessionHudHtml, /\.quick-permission-item \{[\s\S]*?height: 44px;[\s\S]*?\}/);
     assert.match(sessionHudHtml, /\.quick-effort-block \{[\s\S]*?height: 44px;[\s\S]*?\}/);
     // 卡片本体 = 列表区 + 上下内边距 12 + 边框 2
-    assert.strictEqual(178 + 6 + 6 + 2, hudTest.QUICK_MENU_CARD.session);
+    assert.strictEqual(208 + 6 + 6 + 2, hudTest.QUICK_MENU_CARD.session);
     assert.strictEqual(248 + 6 + 6 + 2, hudTest.QUICK_MENU_CARD.settings);
     assert.match(sessionHudHtml, /#hud \{[\s\S]*gap:\s*6px;[\s\S]*\}/);
+  });
+
+  it("会话菜单的列表区算式成立（可滚区 + 底部固定两行）", () => {
+    // 滚动区 148（看得见 5 条：5×28 + 行距 4×2）+ 间距 2 + 底部 58（2×28 + 行距 2）= 208
+    assert.strictEqual(5 * 28 + 4 * 2, 148);
+    assert.strictEqual(2 * 28 + 2, 58);
+    assert.strictEqual(148 + 2 + 58, 208);
+    assert.strictEqual(208 + 6 + 6 + 2, hudTest.QUICK_MENU_CARD.session);
+  });
+
+  it("滚动区会滚、底部两行不滚、滚动条不会把卡片挤得一跳一跳", () => {
+    assert.match(sessionHudHtml, /\.quick-session-scroll \{[\s\S]*?overflow-y:\s*auto;[\s\S]*?\}/);
+    // 滚动条出现/消失时内容宽度不能变，否则 300px 宽的卡片会左右抖
+    assert.match(sessionHudHtml, /\.quick-session-scroll \{[\s\S]*?scrollbar-gutter:\s*stable;[\s\S]*?\}/);
+    assert.match(sessionHudHtml, /\.quick-session-scroll \{[\s\S]*?overscroll-behavior:\s*contain;[\s\S]*?\}/);
+    // 底部两行固定高度、不参与滚动
+    assert.match(sessionHudHtml, /\.quick-session-footer \{[\s\S]*?flex:\s*0 0 auto;[\s\S]*?\}/);
+    // 行外壳：整行按钮 + 右边的置顶按钮并排（置顶按钮不能嵌进按钮里）
+    assert.match(sessionHudHtml, /\.quick-session-row \{[\s\S]*?height:\s*28px;[\s\S]*?\}/);
+    assert.match(sessionHudHtml, /\.quick-session-row > \.quick-session-item \{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?\}/);
   });
 
   it("设置菜单的算式成立（只读状态行 + 4 个权限项 + 强度块 + 行距）", () => {

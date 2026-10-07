@@ -195,8 +195,12 @@ function buildTranscriptIndex(projectsDir, cache) {
  *   - "other": probe false, unknown, or a v1 profile that cannot be probed.
  *     Every one of them is still returned, behind the confirmed rows, for the
  *     Dashboard's collapsed group — the probe is a hint, never a gate.
+ *
+ * Same rows as loadResumableSessionHistory, plus how many confirmed rows the
+ * `limit` left out, so a caller can say "N older sessions" instead of
+ * silently showing a shorter list than the store holds.
  */
-function loadResumableSessionHistory(options = {}) {
+function loadResumableSessionHistoryWithStats(options = {}) {
   const limit = Number.isFinite(options.limit) && options.limit > 0
     ? options.limit
     : DEFAULT_HISTORY_LIMIT;
@@ -274,7 +278,13 @@ function loadResumableSessionHistory(options = {}) {
     const transcriptPath = locatedPaths.get(row);
     if (transcriptPath) row.title = extractTitleFromTranscript(transcriptPath);
   }
-  return visible;
+  // 有多少条 confirmed 没挤进可见列表。调用方要如实说「还有 N 条更早的」——
+  // 静默截断会让用户以为历史就这么点。
+  return { rows: visible, truncated: Math.max(0, confirmed.length - limit) };
+}
+
+function loadResumableSessionHistory(options = {}) {
+  return loadResumableSessionHistoryWithStats(options).rows;
 }
 
 // resolveResumeTarget's folder check, shared with the confirmed grouping: a
@@ -414,12 +424,32 @@ function resolveResumeTarget(agentId, historyKey, options = {}) {
   };
 }
 
+/**
+ * 把一条历史行的不透明标识还原成「哪个 agent 的哪个会话」。
+ *
+ * 和 resolveResumeTarget 的区别只有一个，但是关键的：**不要求项目目录还在**。
+ * 置顶只是排序偏好，跟"能不能续跑"无关——项目文件夹删了、临时目录清了的
+ * 会话照样该能置顶。（续跑那条路仍然走 resolveResumeTarget，那里会拒绝。）
+ */
+function resolveHistoryIdentity(agentId, historyKey, options = {}) {
+  if (typeof agentId !== "string" || !agentId || typeof historyKey !== "string"
+    || !/^[a-f0-9]{32}$/.test(historyKey)) return null;
+  const records = loadSessionHistory({ ...options, limit: undefined });
+  const match = records.find(
+    (record) => record.agentId === agentId && record.historyKey === historyKey,
+  );
+  if (!match) return null;
+  return { agentId: match.agentId, sessionId: match.sessionId, historyKey: match.historyKey };
+}
+
 module.exports = {
   DEFAULT_HISTORY_LIMIT,
   encodeClaudeProjectDir,
   getClaudeProjectsDir,
   probeTranscript,
   loadResumableSessionHistory,
+  loadResumableSessionHistoryWithStats,
   clearTitleExtractionCache,
   resolveResumeTarget,
+  resolveHistoryIdentity,
 };

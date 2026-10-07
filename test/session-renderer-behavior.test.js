@@ -269,6 +269,24 @@ function hudTranslations(overrides = {}) {
     hudQuickLiveHint: "Press Shift+Tab in the terminal to change the mode",
     hudQuickModeDontAsk: "No asking",
     hudQuickModeBypass: "Skip prompts",
+    sessionJustNow: "now",
+    sessionMinAgo: "{n}m ago",
+    sessionHrAgo: "{n}h ago",
+    sessionHudElapsedSec: "{n}s ago",
+    hudHistorySection: "Recent",
+    hudHistoryEnded: "Ended",
+    hudHistoryInterrupted: "Interrupted last time",
+    hudHistoryResuming: "Starting…",
+    hudHistorySubmitted: "Submitted — waiting for the terminal",
+    hudHistoryResumeFailed: "Could not start it — try again",
+    hudHistoryUnresolvable: "No record of that session",
+    hudHistoryAgentUnavailable: "That agent is not enabled",
+    hudHistoryBusy: "Too many starting — try again shortly",
+    hudHistoryAlreadyRunning: "It is already running",
+    hudHistoryDisabledProfile: "Sessions from this profile cannot be resumed",
+    hudHistoryTranscriptMissing: "Transcript is gone",
+    hudHistoryTranscriptUnknown: "Transcript status unknown",
+    hudHistoryMore: "{n} older sessions not shown",
     hudControlEffortSent: "Sent — the session's effort is changed",
     hudControlEffortFailed: "Could not change it — type /effort in the terminal",
     hudControlEffortUnsupported: "This session does not take panel effort changes",
@@ -329,6 +347,24 @@ const HUD_ZH_TRANSLATIONS = hudTranslations({
   hudQuickLiveHint: "运行中的会话要换权限模式，得在终端里按 Shift+Tab",
   hudQuickModeDontAsk: "不用问",
   hudQuickModeBypass: "跳过确认",
+  sessionJustNow: "刚刚",
+  sessionMinAgo: "{n}分钟前",
+  sessionHrAgo: "{n}小时前",
+  sessionHudElapsedSec: "{n} 秒前",
+  hudHistorySection: "最近",
+  hudHistoryEnded: "已结束",
+  hudHistoryInterrupted: "上次没正常收尾",
+  hudHistoryResuming: "正在拉起…",
+  hudHistorySubmitted: "已提交，等终端上报",
+  hudHistoryResumeFailed: "没能拉起来，可以再试一次",
+  hudHistoryUnresolvable: "找不到这个会话的记录",
+  hudHistoryAgentUnavailable: "这个 agent 现在没启用",
+  hudHistoryBusy: "同时在拉起的太多，稍后再试",
+  hudHistoryAlreadyRunning: "它其实已经在跑了",
+  hudHistoryDisabledProfile: "这个配置下的会话没法续跑",
+  hudHistoryTranscriptMissing: "对话记录已不在",
+  hudHistoryTranscriptUnknown: "记录在不在说不准",
+  hudHistoryMore: "还有 {n} 条更早的会话",
   hudControlEffortSent: "已发送：终端里那个会话的强度已改",
   hudControlEffortFailed: "没能改：请到终端里自己敲 /effort",
   hudControlEffortUnsupported: "这个会话不支持面板改强度",
@@ -451,6 +487,7 @@ async function loadHud(options = {}) {
     pickFolder: 0,
     setNewSessionOption: [],
     applyEffort: [],
+    resumeSession: [],
     cancelPendingSession: 0,
     setAttachments: [],
     pickFiles: 0,
@@ -522,6 +559,12 @@ async function loadHud(options = {}) {
       if (options.applyEffortThrows) throw new Error("apply effort failed");
       // 用例可以中途改这个值，模拟"够不着 / 送不进去 / 当前目标不是会话"
       return api.applyEffortResult || { status: "sent" };
+    },
+    resumeSession: async (payload) => {
+      calls.resumeSession.push(payload);
+      if (options.resumeSessionThrows) throw new Error("resume failed");
+      // 用例可以中途改这个值，模拟"已经跑起来了 / 找不到记录 / 拉不起来"
+      return api.resumeSessionResult || { status: "submitted", retryAt: 1 };
     },
   };
 
@@ -1267,7 +1310,7 @@ test("quick panel: 只有支持新建会话的平台才画新建与选文件夹�
   assert.strictEqual(hud.find("quick-session-folder").length, 0);
 });
 
-test("quick panel: 排好的新会话占列表第一行，并挤掉一条会话行", async () => {
+test("quick panel: 排好的新会话占列表第一行，真会话一条不少", async () => {
   const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
   hud.pushQuickState({
     menuOpen: "session",
@@ -1286,18 +1329,196 @@ test("quick panel: 排好的新会话占列表第一行，并挤掉一条会话�
   );
   assert.ok(pending.classList.contains("is-active"), "目标是它时要高亮");
 
-  // 占位占一行，所以真会话只画 3 条——列表区高度是写死的
+  // 列表能滚了，占位不再挤掉会话行：它只是排在最上面
   const sessions = hud.find("quick-session-item").filter((row) => row.getAttribute("data-session-id"));
-  assert.strictEqual(sessions.length, 3, "4 条会话被占位挤掉一条");
+  assert.strictEqual(sessions.length, 4, "占位不再挤掉会话行");
   assert.deepStrictEqual(
     sessions.map((row) => row.getAttribute("data-session-id")),
-    ["s1", "s2", "s3"]
+    ["s1", "s2", "s3", "s4"]
   );
   assert.strictEqual(
-    hud.one("quick-session-list").children[0].className,
+    hud.one("quick-session-scroll").children[0].className,
     "quick-pending-row",
     "占位在最上面"
   );
+  // 滚动区只装会话行；「新建 / 选文件夹」钉在底部，不跟着滚
+  assert.strictEqual(hud.one("quick-session-scroll").parentNode.className, "quick-session-list");
+  assert.deepStrictEqual(
+    hud.one("quick-session-footer").children.map((row) => row.className),
+    ["quick-session-item quick-session-create", "quick-session-item quick-session-folder"],
+    "底部两行固定在卡片下沿"
+  );
+});
+
+test("quick panel: 会话列表能滚，状态更新不会把滚动位置顶回顶部", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  const rows = (n) => Array.from({ length: n }, (_, i) => ({
+    id: `s${i}`, title: `S${i}`, folder: "proj", state: "idle", active: false,
+  }));
+  const push = (sessions, extra) => hud.pushQuickState({
+    canSend: true, targetTitle: "x", menuOpen: "session", sessions, ...extra,
+  });
+
+  push(rows(6));
+  const scroll = hud.one("quick-session-scroll");
+  assert.ok(scroll, "会话列表住在可滚动的壳里");
+  scroll.scrollTop = 40;
+
+  // 列表内容一个字没变（只是别的字段变了）：不该重建 DOM，滚动位置自然还在。
+  // 会话状态每变一次主进程都会推一份新投影，每次都重建的话根本没法往下滚。
+  const firstRow = hud.one("quick-session-item");
+  push(rows(6), { targetTitle: "y" });
+  assert.strictEqual(hud.one("quick-session-item"), firstRow, "内容没变就不重建行");
+  assert.strictEqual(scroll.scrollTop, 40);
+
+  // 列表真的变了（多了一个会话）：重建，但滚动位置要接着原来那儿
+  push(rows(7));
+  assert.strictEqual(hud.find("quick-session-row").length, 7);
+  assert.strictEqual(scroll.scrollTop, 40, "重建后滚动位置接着原来那儿");
+});
+
+// ── 「最近」那一组：历史会话 ─────────────────────────────────────────────
+// 点它是「把那个会话重新拉起来接着聊」，不是「往那儿发消息」——那个会话根本没
+// 在跑。这几条用例主要就是在钉这条界线，别哪天被顺手改成选中了。
+
+const HISTORY_KEY = "a".repeat(32);
+
+function historyRow(extra = {}) {
+  return {
+    historyKey: HISTORY_KEY,
+    agentId: "claude-code",
+    title: "修和弦识别",
+    folder: "乐谱",
+    lastEventAt: Date.now() - 7200_000,
+    interrupted: false,
+    transcriptPresent: true,
+    group: "confirmed",
+    ...extra,
+  };
+}
+
+function pushHistory(hud, rows, extra = {}) {
+  hud.pushQuickState({
+    menuOpen: "session", canCreateSession: true,
+    targetId: "s1", targetTitle: "S1",
+    sessions: [{ id: "s1", title: "S1", folder: "proj", state: "working", active: true }],
+    history: rows,
+    ...extra,
+  });
+}
+
+test("quick panel: 历史会话排在「最近」线下面，点一下是续跑不是选会话", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  pushHistory(hud, [historyRow()]);
+
+  const divider = hud.one("quick-session-divider");
+  assert.ok(divider, "要有「最近」分隔线");
+  assert.strictEqual(divider.children[0].textContent, "最近");
+  assert.deepStrictEqual(
+    hud.one("quick-session-scroll").children.map((child) => child.className),
+    ["quick-session-row", "quick-session-divider", "quick-session-row"],
+    "运行中的会话在上面、分隔线与历史在下面"
+  );
+
+  const row = hud.one("quick-session-history");
+  assert.ok(row, "要有历史会话行");
+  assert.strictEqual(byClass(row, "quick-session-name")[0].textContent, "修和弦识别");
+  assert.strictEqual(byClass(row, "quick-session-meta")[0].textContent, "乐谱 · 已结束 · 2小时前");
+  assert.ok(!row.classList.contains("is-active"), "历史行永远不高亮（那是发送目标的标记）");
+
+  await row.dispatch("click");
+  await flush();
+  assert.strictEqual(hud.calls.resumeSession.length, 1);
+  assert.strictEqual(hud.calls.resumeSession[0].agentId, "claude-code");
+  assert.strictEqual(hud.calls.resumeSession[0].historyKey, HISTORY_KEY);
+  assert.deepStrictEqual(
+    Object.keys(hud.calls.resumeSession[0]).sort(),
+    ["agentId", "historyKey"],
+    "续跑只递这两个字段，别的（目录、权限模式）一概不带"
+  );
+  assert.deepStrictEqual(hud.calls.selectSession, [], "历史行绝不能变成发送目标");
+  assert.deepStrictEqual(hud.calls.sendPrompt, []);
+
+  // 提交之后先禁用：连点两下会开出两个进程
+  const after = hud.one("quick-session-history");
+  assert.strictEqual(after.disabled, true);
+  assert.match(byClass(after, "quick-session-meta")[0].textContent, /已提交/);
+  // 主进程再推一次状态（整个列表会重建），禁用状态仍然在——状态存在 Map 上而不是节点上
+  pushHistory(hud, [historyRow()]);
+  assert.strictEqual(hud.one("quick-session-history").disabled, true, "重建后状态不能丢");
+});
+
+test("quick panel: 续跑失败如实说，而且分得清是哪一种", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  pushHistory(hud, [historyRow()]);
+
+  const cases = [
+    ["unresolvable", /找不到这个会话的记录/],
+    ["agent-unavailable", /这个 agent 现在没启用/],
+    ["busy", /同时在拉起的太多/],
+    ["launch-failed", /没能拉起来/],
+  ];
+  for (const [reason, pattern] of cases) {
+    hud.api.resumeSessionResult = { status: "error", reason };
+    await hud.one("quick-session-history").dispatch("click");
+    await flush();
+    const meta = byClass(hud.one("quick-session-history"), "quick-session-meta")[0].textContent;
+    assert.match(meta, pattern, `reason=${reason} 的文案`);
+    assert.ok(!/已提交/.test(meta), "失败绝不能说成已提交");
+    // 失败之后还能再试
+    assert.strictEqual(hud.one("quick-session-history").disabled, false);
+  }
+});
+
+test("quick panel: 已经在跑的历史会话给一句实话，不当成失败", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  pushHistory(hud, [historyRow()]);
+  hud.api.resumeSessionResult = { status: "already-running" };
+  await hud.one("quick-session-history").dispatch("click");
+  await flush();
+  assert.match(hud.one("quick-status-text").textContent, /已经在跑/);
+  assert.strictEqual(hud.one("quick-session-history").disabled, false);
+});
+
+test("quick panel: 记录没了、拿不准、不能续跑——三种情形分开说", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+
+  pushHistory(hud, [historyRow({ transcriptPresent: false })]);
+  assert.match(
+    byClass(hud.one("quick-session-history"), "quick-session-meta")[0].textContent,
+    /对话记录已不在/
+  );
+
+  // null = 说不准。说成"没了"就是撒谎，说成"有"也是。
+  pushHistory(hud, [historyRow({ transcriptPresent: null })]);
+  const unknownMeta = byClass(hud.one("quick-session-history"), "quick-session-meta")[0].textContent;
+  assert.match(unknownMeta, /说不准/);
+  assert.ok(!/已不在/.test(unknownMeta));
+
+  // 续不了的要真的禁用（不是只换个字）
+  pushHistory(hud, [historyRow({ resumeDisabledReason: "profile-unverified" })]);
+  const disabled = hud.one("quick-session-history");
+  assert.strictEqual(disabled.disabled, true);
+  assert.match(byClass(disabled, "quick-session-meta")[0].textContent, /没法续跑/);
+  await disabled.dispatch("click");
+  await flush();
+  assert.deepStrictEqual(hud.calls.resumeSession, [], "禁用的行点了也不该发请求");
+
+  // 中断收尾的会话也要如实标出来
+  pushHistory(hud, [historyRow({ interrupted: true })]);
+  assert.match(
+    byClass(hud.one("quick-session-history"), "quick-session-meta")[0].textContent,
+    /上次没正常收尾/
+  );
+});
+
+test("quick panel: 历史被截断时明说还有多少条，不许偷偷少显示", async () => {
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  pushHistory(hud, [historyRow()], { historyTruncated: 0 });
+  assert.strictEqual(hud.one("quick-session-more"), null, "没截断就不该出现这行");
+
+  pushHistory(hud, [historyRow()], { historyTruncated: 7 });
+  assert.strictEqual(hud.one("quick-session-more").textContent, "还有 7 条更早的会话");
 });
 
 test("quick panel: 目标是不成信儿的占位时，状态行说明它在等第一句话", async () => {
@@ -1340,21 +1561,27 @@ test("quick panel: 没有占位时不画那一行", async () => {
   assert.strictEqual(hud.find("quick-pending-row").length, 0);
 });
 
-test("quick panel: 会话行最多 4 条，列表区行数固定", async () => {
+test("quick panel: 会话行全都画出来（列表能滚了），底部两行固定在最后", async () => {
   const hud = await loadHud();
-  hud.pushQuickState({
-    menuOpen: "session",
-    canCreateSession: true,
-    sessions: [1, 2, 3, 4, 5].map((n) => ({
-      id: `s${n}`, title: `S${n}`, folder: `p${n}`, state: "idle", active: false,
-    })),
-  });
+  const sessions = (n) => Array.from({ length: n }, (_, i) => ({
+    id: `s${i + 1}`, title: `S${i + 1}`, folder: `p${i + 1}`, state: "idle", active: false,
+  }));
+  hud.pushQuickState({ menuOpen: "session", canCreateSession: true, sessions: sessions(5) });
   const items = hud.find("quick-session-item");
-  // 4 条会话 + 新建入口 + 选文件夹入口 = 6 行，正好是列表区的固定行数。
-  assert.strictEqual(items.length, 6);
-  assert.strictEqual(byClass(items[3], "quick-session-name")[0].textContent, "S4");
-  assert.strictEqual(byClass(items[4], "quick-session-name")[0].textContent, "＋ New session in the terminal");
-  assert.strictEqual(byClass(items[5], "quick-session-name")[0].textContent, "📁 Choose a folder…");
+  // 5 条会话 + 新建入口 + 选文件夹入口。行数不再被列表区的高度卡死——看不见
+  // 的部分滚一下就有了，底部那两行始终在最后。
+  assert.strictEqual(items.length, 7);
+  assert.strictEqual(byClass(items[4], "quick-session-name")[0].textContent, "S5");
+  assert.strictEqual(byClass(items[5], "quick-session-name")[0].textContent, "＋ New session in the terminal");
+  assert.strictEqual(byClass(items[6], "quick-session-name")[0].textContent, "📁 Choose a folder…");
+
+  // 只兜一个安全上限，免得真给几百条时渲染卡住
+  hud.pushQuickState({ menuOpen: "session", canCreateSession: true, sessions: sessions(40) });
+  assert.strictEqual(
+    hud.find("quick-session-row").length,
+    20,
+    "再多也只画 20 条（安全上限，面板就这么大）"
+  );
 });
 
 test("quick panel: 新建会话那一行与选文件夹那一行都写明当前目录", async () => {

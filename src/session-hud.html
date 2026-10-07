@@ -101,7 +101,7 @@ body.has-attachments .quick-card { height: 94px; }
    点状态行 → 会话菜单；点齿轮 → 设置菜单。它是**另一张卡片**：主卡片高度一点
    不变，菜单卡片在主卡片上方淡入（不再是把整张卡片拉高）。
    卡片本体的高度 = 内容 + 上下内边距 12 + 边框 2：
-     会话 178 + 14 = 192；设置 248 + 14 = 262。
+     会话 208 + 14 = 222；设置 248 + 14 = 262。
    窗口整体高度 = 主卡片 + 6px 间距 + 菜单卡片，由主进程按同一组数字算。 */
 .quick-menu-card {
   display: none;
@@ -121,7 +121,7 @@ body.has-attachments .quick-card { height: 94px; }
 
 body.session-menu-open .quick-menu-card,
 body.settings-menu-open .quick-menu-card { display: flex; }
-body.session-menu-open .quick-menu-card { height: 192px; }
+body.session-menu-open .quick-menu-card { height: 222px; }
 body.settings-menu-open .quick-menu-card { height: 262px; }
 
 /* 淡入：从透明 + 稍微靠下一点浮上来（@starting-style 是首帧样式，Chromium 支持） */
@@ -218,7 +218,10 @@ body.session-menu-open .quick-target-caret { transform: rotate(180deg); }
 .quick-settings-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .quick-settings-icon { font-size: 13px; line-height: 1; }
 
-/* ===== 菜单列表（两个菜单共用这个容器，展开高度不同） ===== */
+/* ===== 菜单列表（两个菜单共用这个容器，展开高度不同） =====
+   会话菜单里这个容器装两个壳：上面是可滚动的会话/历史列表，下面是钉住的
+   「新建会话 / 选择文件夹」两行——那两行**不跟着滚**，会话一多也不会把它们
+   挤出屏幕。设置菜单不变，内容直接塞进这个容器。 */
 .quick-session-list {
   flex: 1 1 auto;
   min-height: 0;
@@ -227,10 +230,42 @@ body.session-menu-open .quick-target-caret { transform: rotate(180deg); }
   gap: 2px;
   overflow: hidden;
 }
-/* 会话菜单：最多 4 条会话（4×28）+ 新建（28）+ 选文件夹（28）+ 行距 5×2 = 178 */
-body.session-menu-open .quick-session-list { height: 178px; }
+/* 会话菜单：滚动区 148（看得见 5 条：5×28 + 行距 4×2）
+   + 间距 2 + 底部两行 58（2×28 + 行距 2）= 208 */
+body.session-menu-open .quick-session-list { height: 208px; }
 /* 设置菜单：只读状态行（18）+ 4 个权限项（4×44）+ 强度块（44）+ 行距 5×2 = 248 */
 body.settings-menu-open .quick-session-list { height: 248px; }
+
+/* 可滚动的那半：运行中的会话和「最近」历史都住在这里，条数多就滚。
+   scrollbar-gutter: stable 让滚动条出现/消失时内容宽度不变（300px 宽的卡片
+   一抖就看出来了）；overscroll-behavior 免得滚到头把滚动传给整页。 */
+.quick-session-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+.quick-session-scroll::-webkit-scrollbar { width: 8px; }
+.quick-session-scroll::-webkit-scrollbar-track { background: transparent; }
+.quick-session-scroll::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.35);
+}
+.quick-session-scroll::-webkit-scrollbar-thumb:hover { background: rgba(127, 127, 127, 0.55); }
+
+/* 钉在卡片底部的两行（新建会话 / 选择文件夹）：不参与滚动。
+   右边让出 8px＝滚动区给滚动条留的那条沟，两边的行才对得齐。 */
+.quick-session-footer {
+  flex: 0 0 auto;
+  padding-right: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 
 /* ===== 只读状态行：「终端里：计划 · 高」 =====
    读的是会话自己上报的真值（hook 带回来的 permission_mode / effort）。面板不
@@ -255,6 +290,58 @@ body.settings-menu-open .quick-session-list { height: 248px; }
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
+}
+
+/* 会话行的外壳：整行可点的按钮 +（以后）右边并排的置顶按钮。
+   置顶按钮必须是它的**兄弟节点**，不能嵌进按钮里——按钮套按钮既是非法结构，
+   点击也会和整行选中打架。底部那两行（新建 / 选文件夹）不套这层壳。 */
+.quick-session-row {
+  flex: 0 0 28px;
+  height: 28px;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+}
+.quick-session-row > .quick-session-item { flex: 1 1 auto; min-width: 0; }
+
+/* ===== 「最近」那一组（历史会话） =====
+   线下面都是已经结束的会话：点一下是「重新拉起来接着聊」，不是选中它。
+   它们永远没有高亮底，也永远不进状态行——那两处才是「消息会发到这里」的标记。 */
+.quick-session-divider {
+  flex: 0 0 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-muted);
+  overflow: hidden;
+}
+/* 线：占满剩下的宽度，一眼看出上下是两拨东西 */
+.quick-session-divider::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--hud-border);
+}
+
+.quick-session-history .quick-session-name { color: var(--text-muted); }
+.quick-session-item:disabled { opacity: 0.6; cursor: default; }
+.quick-session-item:disabled:hover { background: transparent; }
+
+.quick-session-more {
+  flex: 0 0 16px;
+  height: 16px;
+  padding: 0 8px;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .quick-session-item {

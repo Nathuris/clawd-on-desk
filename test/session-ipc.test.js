@@ -106,6 +106,8 @@ function createHarness(overrides = {}) {
           || ((menu) => { calls.push(["quickSetMenuOpen", menu]); return { status: "ok" }; }),
         quickApplyEffort: overrides.quickApplyEffort
           || ((level) => { calls.push(["quickApplyEffort", level]); return { status: "sent" }; }),
+        quickResumeSession: overrides.quickResumeSession
+          || ((payload) => { calls.push(["quickResumeSession", payload]); return { status: "submitted" }; }),
         quickSetHold: overrides.quickSetHold
           || ((reason, held) => { calls.push(["quickSetHold", reason, held]); }),
         quickSetClickThrough: overrides.quickSetClickThrough
@@ -233,6 +235,7 @@ test("session IPC registers owned channels and disposes them", () => {
     "session-hud:new-session",
     "session-hud:pick-file",
     "session-hud:pick-folder",
+    "session-hud:resume-session",
     "session-hud:save-pasted-file",
     "session-hud:select-session",
     "session-hud:send-prompt",
@@ -848,6 +851,50 @@ test("apply-effort 的载荷闸门：只认一个 level，且必须在允许表�
     { status: "sent" }
   );
   assert.deepStrictEqual(calls, [["quickApplyEffort", "xhigh"]]);
+});
+
+test("resume-session 的载荷闸门：只认 agent 与 32 位 hex 的 historyKey", async () => {
+  const { ipcMain, calls, trustedHudEvent, hudWebContents, hudMainFrame } = createHarness();
+  const good = { agentId: "claude-code", historyKey: "a".repeat(32) };
+
+  const bad = [
+    undefined,
+    null,
+    [],
+    "claude-code",
+    {},
+    { agentId: "claude-code" },
+    { historyKey: "a".repeat(32) },
+    { agentId: "", historyKey: "a".repeat(32) },
+    { agentId: "claude-code", historyKey: "" },
+    { agentId: "claude-code", historyKey: "ZZZZ" },
+    { agentId: "claude-code", historyKey: "A".repeat(32) },
+    { agentId: "claude-code", historyKey: "a".repeat(31) },
+    { agentId: "claude-code", historyKey: "a".repeat(33) },
+    // 续跑会拉起真进程：多带字段（比如想自己指定目录/权限）一律不接受
+    { agentId: "claude-code", historyKey: "a".repeat(32), cwd: "/tmp" },
+    { agentId: "claude-code", historyKey: "a".repeat(32), mode: "dangerous" },
+  ];
+  for (const payload of bad) {
+    const result = await ipcMain.invokeFrom(trustedHudEvent, "session-hud:resume-session", payload);
+    assert.deepStrictEqual(result, { status: "invalid" }, JSON.stringify(payload));
+  }
+  assert.deepStrictEqual(calls, [], "非法载荷不得触达 owner");
+
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(trustedHudEvent, "session-hud:resume-session", good),
+    { status: "submitted" }
+  );
+  // 交给 owner 的只有这两个字段，别的都不带（尤其没有权限模式）
+  assert.deepStrictEqual(calls, [["quickResumeSession", { agentId: "claude-code", historyKey: "a".repeat(32) }]]);
+
+  // 伪造的 sender 一律先被信任闸门拦下
+  const forged = { sender: hudWebContents, senderFrame: { ...hudMainFrame } };
+  assert.deepStrictEqual(
+    await ipcMain.invokeFrom(forged, "session-hud:resume-session", good),
+    { status: "error", reason: "untrusted-hud-sender" }
+  );
+  assert.deepStrictEqual(calls.length, 1, "不可信的 sender 不该触达 owner");
 });
 
 test("pick-file 只认 HUD 主 frame，并把路径交回渲染端", async () => {

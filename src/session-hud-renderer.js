@@ -38,6 +38,12 @@ let settingsBtnEl = null;
 let settingsMenuEls = null;
 let targetBtnEl = null;
 let sessionListEl = null;
+// 会话菜单里的两个壳：上面是可滚动的列表，下面是钉在底部不滚的两行。
+let sessionScrollEl = null;
+let sessionFooterEl = null;
+// 上一次画进滚动区的内容签名：状态变了但列表内容没变就不重建 DOM，
+// 否则每来一次会话状态更新都会把滚动位置顶回顶部（还会闪一下）。
+let sessionScrollSignature = null;
 let promptInputEl = null;
 let attachBtnEl = null;
 let attachRowEl = null;
@@ -73,6 +79,30 @@ function normalizeSession(raw) {
   };
 }
 
+// 一行历史会话。渲染端只需要展示要用的字段 + 一个不透明的 historyKey：
+// 续跑时把它原样递回主进程，别的什么都不用（也不该）带。
+function normalizeHistoryRow(raw) {
+  if (!raw || typeof raw !== "object" || !raw.historyKey) return null;
+  return {
+    historyKey: String(raw.historyKey),
+    agentId: typeof raw.agentId === "string" && raw.agentId ? raw.agentId : null,
+    title: typeof raw.title === "string" && raw.title ? raw.title : null,
+    folder: typeof raw.folder === "string" && raw.folder ? raw.folder : null,
+    sessionTag: typeof raw.sessionTag === "string" && raw.sessionTag ? raw.sessionTag : null,
+    lastEventAt: Number.isFinite(raw.lastEventAt) ? raw.lastEventAt : null,
+    interrupted: raw.interrupted === true,
+    // true 有记录 / false 确认没了 / null 说不准——三种分开，别把"拿不准"说成"没了"
+    transcriptPresent: raw.transcriptPresent === true
+      ? true
+      : (raw.transcriptPresent === false ? false : null),
+    resumeDisabledReason: typeof raw.resumeDisabledReason === "string" && raw.resumeDisabledReason
+      ? raw.resumeDisabledReason
+      : null,
+    group: raw.group === "other" ? "other" : "confirmed",
+    resumePending: raw.resumePending === true,
+  };
+}
+
 function normalizeQuickState(raw) {
   const s = raw && typeof raw === "object" ? raw : {};
   return {
@@ -82,6 +112,11 @@ function normalizeQuickState(raw) {
     targetState: typeof s.targetState === "string" && s.targetState ? s.targetState : null,
     canSend: s.canSend === true,
     sessions: Array.isArray(s.sessions) ? s.sessions.map(normalizeSession).filter(Boolean) : [],
+    // 「最近」那一组：已经结束、但还能重新拉起来接着聊的会话
+    history: Array.isArray(s.history) ? s.history.map(normalizeHistoryRow).filter(Boolean) : [],
+    historyTruncated: Number.isFinite(s.historyTruncated) && s.historyTruncated > 0
+      ? Math.floor(s.historyTruncated)
+      : 0,
     canCreateSession: s.canCreateSession === true,
     // 新建会话落在哪个文件夹：主进程给「显示用短路径」和「最后一段目录名」两份。
     newSessionFolder: typeof s.newSessionFolder === "string" && s.newSessionFolder ? s.newSessionFolder : null,
@@ -185,6 +220,10 @@ function updateMenu() {
     settingsMenuEls = null;
     liveLabelEl = null;
     liveValueEl = null;
+    sessionScrollSignature = null;
+    // 续跑状态跟着菜单这一轮走：菜单一收就清掉。不然十分钟后重开菜单，那行字
+    // 还停在"已提交"上——真相在主进程那边（它会说这条到底活了没有）。
+    historyActionState.clear();
     if (sessionListEl.children.length) sessionListEl.replaceChildren();
     return;
   }
@@ -232,9 +271,10 @@ function createStatusRow() {
   return statusRow;
 }
 
-// 两个菜单共用这个容器：点状态行开会话菜单，点齿轮开设置菜单。渲染端最多画
-// SESSION_ROW_LIMIT 条会话；菜单高度是写死的一组数字，和主进程一一对应。
-const SESSION_ROW_LIMIT = 4;
+// 两个菜单共用这个容器：点状态行开会话菜单，点齿轮开设置菜单。
+// 列表区现在能滚，看得见几条由 CSS 的滚动区高度说了算，这里只兜一个安全上限
+// （面板就这么大，真给几百条也没意义，渲染还慢）。
+const SESSION_RENDER_LIMIT = 20;
 
 // 两个开关的可选项。值必须和 src/session-new-options.js 的允许列表一致——
 // 主进程只认那几个值，写错了会被打回默认档。
@@ -314,7 +354,181 @@ function refreshLiveRow() {
 function createSessionList() {
   sessionListEl = document.createElement("div");
   sessionListEl.className = "quick-session-list";
+  ensureSessionShells();
   return sessionListEl;
+}
+
+// 会话菜单的两个壳：上面是可滚动的列表，下面是钉在底部不滚的「新建 / 选文件夹」。
+// 设置菜单会把 sessionListEl 的内容整个换掉（replaceChildren），所以每次画会话
+// 菜单之前先确认这两个壳还在，不在就重建（重建时上一次的内容签名作废）。
+function ensureSessionShells() {
+  if (sessionScrollEl && sessionScrollEl.parentNode === sessionListEl) return;
+  sessionScrollSignature = null;
+  sessionScrollEl = document.createElement("div");
+  sessionScrollEl.className = "quick-session-scroll";
+  // 滚动容器自己不参与 Tab：否则 Esc 收起菜单、方向键都会先被它吃掉。
+  sessionScrollEl.tabIndex = -1;
+  sessionFooterEl = document.createElement("div");
+  sessionFooterEl.className = "quick-session-footer";
+  sessionListEl.replaceChildren(sessionScrollEl, sessionFooterEl);
+}
+
+// 一条会话行。外面套一层 .quick-session-row：整行可点的按钮 +（之后）右边并排的
+// 置顶按钮。置顶按钮不能嵌进按钮里，所以壳是必需的。
+function createSessionRow(item) {
+  const wrap = document.createElement("div");
+  wrap.className = "quick-session-row";
+
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "quick-session-item";
+  if (item.active) row.classList.add("is-active");
+  row.setAttribute("data-session-id", item.id);
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "quick-session-name";
+  nameEl.textContent = item.title || item.folder || item.id;
+  row.appendChild(nameEl);
+
+  const metaEl = document.createElement("span");
+  metaEl.className = "quick-session-meta";
+  metaEl.textContent = sessionMetaText(item);
+  row.appendChild(metaEl);
+
+  row.addEventListener("click", () => handleSessionPick(item.id));
+  wrap.appendChild(row);
+  return wrap;
+}
+
+/* ===== 「最近」那一组：历史会话（点一下 = 重新拉起来接着聊） =====
+   这不是"往那儿发消息"——那个会话根本没在跑。所以这一组里的一行永远不会变成
+   发送目标（主进程那边也有第二道闸：选中一个不在实时快照里的 id 会被拒）。 */
+
+// 续跑的状态机。挂在 Map 上、不挂在 DOM 上：列表一推新状态就整个重建，
+// 挂在节点上的状态会被冲掉，用户就会看到按钮"自己又活了"。
+const historyActionState = new Map(); // historyKey -> { status, reason }
+
+// 主进程回来的失败原因是分开的，别糅成一句"失败了"——用户得知道能不能再试。
+const RESUME_ERROR_KEYS = {
+  unresolvable: "hudHistoryUnresolvable",
+  "agent-unavailable": "hudHistoryAgentUnavailable",
+  busy: "hudHistoryBusy",
+  "already-running": "hudHistoryAlreadyRunning",
+};
+
+function resumeStateText(state) {
+  if (!state) return "";
+  if (state.status === "pending") return t("hudHistoryResuming");
+  if (state.status === "submitted") return t("hudHistorySubmitted");
+  return t(RESUME_ERROR_KEYS[state.reason] || "hudHistoryResumeFailed");
+}
+
+// 这一行现在该显示什么状态词。有本地动作状态就优先显示它（正在拉起/已提交/失败），
+// 否则显示它本来的样子（已结束 / 已中断 / 不能续跑的原因）。
+function historyStatusText(row) {
+  const local = resumeStateText(historyActionState.get(row.historyKey));
+  if (local) return local;
+  if (row.resumeDisabledReason === "profile-unverified") return t("hudHistoryDisabledProfile");
+  // 主进程说这条正在续跑中（比如 Dashboard 那边刚点的）
+  if (row.resumePending) return t("hudHistorySubmitted");
+  return t(row.interrupted ? "hudHistoryInterrupted" : "hudHistoryEnded");
+}
+
+function historyMetaText(row) {
+  const when = row.lastEventAt ? formatElapsed(Date.now() - row.lastEventAt) : "";
+  // 拿不准（null）和确认没了（false）分开说：把"说不准"说成"没了"是撒谎。
+  const transcript = row.transcriptPresent === false
+    ? t("hudHistoryTranscriptMissing")
+    : (row.transcriptPresent === null ? t("hudHistoryTranscriptUnknown") : "");
+  return [row.folder, historyStatusText(row), when, transcript].filter(Boolean).join(" · ");
+}
+
+function createHistoryDivider() {
+  const divider = document.createElement("div");
+  divider.className = "quick-session-divider";
+  const label = document.createElement("span");
+  label.textContent = t("hudHistorySection");
+  divider.appendChild(label);
+  return divider;
+}
+
+function createHistoryMore(count) {
+  const more = document.createElement("div");
+  more.className = "quick-session-more";
+  more.textContent = t("hudHistoryMore").replace("{n}", count);
+  return more;
+}
+
+// 一行历史会话：整行可点的按钮。永远不带 .is-active（那是"消息会发到这里"的
+// 唯一标记），点了是续跑，不是选中。
+function createHistoryRow(row) {
+  const wrap = document.createElement("div");
+  wrap.className = "quick-session-row";
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "quick-session-item quick-session-history";
+  button.setAttribute("data-history-key", row.historyKey);
+  const disabled = !!row.resumeDisabledReason;
+  const busy = historyActionState.get(row.historyKey)?.status === "pending"
+    || historyActionState.get(row.historyKey)?.status === "submitted"
+    || row.resumePending;
+  if (disabled || busy) {
+    button.disabled = true;
+    button.classList.add("is-disabled");
+  }
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "quick-session-name";
+  nameEl.textContent = row.title || row.sessionTag || row.historyKey;
+  button.appendChild(nameEl);
+
+  const metaEl = document.createElement("span");
+  metaEl.className = "quick-session-meta";
+  metaEl.textContent = historyMetaText(row);
+  button.appendChild(metaEl);
+
+  if (!disabled && !busy) button.addEventListener("click", () => handleResumeHistoryRow(row));
+  wrap.appendChild(button);
+  return wrap;
+}
+
+// 点一条历史会话 = 请主进程把那个会话重新拉起来。状态先本地置位（按钮立刻变灰，
+// 免得连点两下开出两个进程），再按主进程的回复落到 submitted 或 error。
+async function handleResumeHistoryRow(row) {
+  if (row.resumeDisabledReason) return;
+  const current = historyActionState.get(row.historyKey);
+  if (current && (current.status === "pending" || current.status === "submitted")) return;
+  historyActionState.set(row.historyKey, { status: "pending" });
+  repaintSessionMenu();
+  let result = null;
+  try {
+    result = await window.sessionHudAPI.resumeSession({
+      agentId: row.agentId,
+      historyKey: row.historyKey,
+    });
+  } catch {
+    result = { status: "error", reason: "launch-failed" };
+  }
+  const status = result && result.status;
+  if (status === "submitted") {
+    historyActionState.set(row.historyKey, { status: "submitted" });
+  } else if (status === "already-running") {
+    // 它其实已经在跑了：从这一组里拿掉，等主进程下一次推送就会出现在上面
+    historyActionState.delete(row.historyKey);
+    showQuickFeedback(t("hudHistoryAlreadyRunning"), false);
+  } else {
+    historyActionState.set(row.historyKey, {
+      status: "error",
+      reason: (result && result.reason) || "launch-failed",
+    });
+  }
+  repaintSessionMenu();
+}
+
+// 菜单还开着才重画（关着的时候列表是空的，重画只会白建节点）。
+function repaintSessionMenu() {
+  if (quickState.menuOpen === "session") renderSessionMenu();
 }
 
 // 按开的是哪个菜单画对应内容。
@@ -350,33 +564,37 @@ function patchSettingsMenu() {
   });
 }
 
-// 会话菜单：排好的新会话 + 会话列表 + 新建 + 选文件夹。
+// 会话菜单：滚动区（排好的新会话 + 会话列表）+ 底部固定的新建 / 选文件夹。
 function renderSessionMenu() {
-  // 排好的新会话占一行，所以真会话的行数让出一位给它。
-  const budget = SESSION_ROW_LIMIT - (quickState.pendingId ? 1 : 0);
-  const items = quickState.sessions.slice(0, budget);
+  ensureSessionShells();
+  // 列表能滚了，排好的新会话（占位行）不再需要挤掉一条会话——它只是排在最上面。
+  const items = quickState.sessions.slice(0, SESSION_RENDER_LIMIT);
   const nodes = [];
   if (quickState.pendingId) nodes.push(createPendingRow());
-  for (const item of items) {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "quick-session-item";
-    if (item.active) row.classList.add("is-active");
-    row.setAttribute("data-session-id", item.id);
+  for (const item of items) nodes.push(createSessionRow(item));
 
-    const nameEl = document.createElement("span");
-    nameEl.className = "quick-session-name";
-    nameEl.textContent = item.title || item.folder || item.id;
-    row.appendChild(nameEl);
-
-    const metaEl = document.createElement("span");
-    metaEl.className = "quick-session-meta";
-    metaEl.textContent = sessionMetaText(item);
-    row.appendChild(metaEl);
-
-    row.addEventListener("click", () => handleSessionPick(item.id));
-    nodes.push(row);
+  // 「最近」那一组：已经结束、但还能重新拉起来接着聊的会话。分隔线一直在——
+  // 这一组里的一行不是发送目标，界线得看得出来。
+  if (quickState.history.length) {
+    nodes.push(createHistoryDivider());
+    for (const row of quickState.history) nodes.push(createHistoryRow(row));
+    if (quickState.historyTruncated > 0) nodes.push(createHistoryMore(quickState.historyTruncated));
   }
+
+  // 滚动区只在内容真的变了才重建。会话状态每变一次主进程都会推一份新投影，
+  // 每次都重建的话滚动位置会被顶回顶部、还会闪一下。
+  const signature = JSON.stringify([
+    i18nPayload.lang, quickState.pendingId, quickState.targetPending, items,
+    quickState.history, quickState.historyTruncated, [...historyActionState],
+  ]);
+  if (signature !== sessionScrollSignature) {
+    const scrollTop = sessionScrollEl.scrollTop;
+    sessionScrollEl.replaceChildren(...nodes);
+    sessionScrollEl.scrollTop = scrollTop;
+    sessionScrollSignature = signature;
+  }
+
+  const footerNodes = [];
   if (quickState.canCreateSession) {
     const createRow = document.createElement("button");
     createRow.type = "button";
@@ -395,7 +613,7 @@ function renderSessionMenu() {
       createRow.appendChild(metaEl);
     }
     createRow.addEventListener("click", handleCreateSession);
-    nodes.push(createRow);
+    footerNodes.push(createRow);
 
     const folderRow = document.createElement("button");
     folderRow.type = "button";
@@ -411,9 +629,9 @@ function renderSessionMenu() {
       folderRow.appendChild(metaEl);
     }
     folderRow.addEventListener("click", handlePickFolder);
-    nodes.push(folderRow);
+    footerNodes.push(folderRow);
   }
-  sessionListEl.replaceChildren(...nodes);
+  sessionFooterEl.replaceChildren(...footerNodes);
 }
 
 // 设置菜单：权限列表（大字名称 + 小字解释）+ 强度滑块。
@@ -571,6 +789,16 @@ function sessionMetaText(item) {
   const quiet = item.state === "idle" || item.state === "sleeping";
   const state = item.state ? t(quiet ? "hudQuickStatusIdle" : "hudQuickStatusWorking") : "";
   return [item.folder, state].filter(Boolean).join(" · ");
+}
+
+// 「多久以前」——和 Dashboard 那份 formatElapsed 同一套文案，口径保持一致。
+function formatElapsed(ms) {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (sec < 5) return t("sessionJustNow");
+  if (sec < 60) return t("sessionHudElapsedSec").replace("{n}", sec);
+  const min = Math.floor(sec / 60);
+  if (min < 60) return t("sessionMinAgo").replace("{n}", min);
+  return t("sessionHrAgo").replace("{n}", Math.floor(min / 60));
 }
 
 function createInputRow() {
