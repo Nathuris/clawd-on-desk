@@ -5,13 +5,14 @@ const {
   resolveResumeTarget,
   resolveHistoryIdentity,
 } = require("./session-history-loader");
+const { sessionAliasKey } = require("./session-alias");
 
 const RESUME_CONFIRMATION_MS = 30_000;
 
 // One owner in main, surviving Dashboard recreation. Terminal spawn is only
 // submission; the normal hook/state path is the evidence that a session is live.
 function createSessionHistoryRuntime({ getSessions, isAgentEnabled, launchClaudeSession,
-  historyOptions = {}, now = Date.now } = {}) {
+  historyOptions = {}, getSessionAliases = null, now = Date.now } = {}) {
   const launches = new Map();
 
   function activeIds() {
@@ -30,8 +31,29 @@ function createSessionHistoryRuntime({ getSessions, isAgentEnabled, launchClaude
     return ids;
   }
 
+  // 用户给会话起过的名字（会话别名）。历史行的名字本来是从对话记录里现读的，
+  // 会话一关，用户起过的名字就丢了、退回成一串会话编号——这正是"关了会话名字
+  // 变乱码"的来头。所以这里先查别名，查到就用它。
+  // key 跟会话还活着时（state-session-snapshot）算的是同一套，用的是同一个
+  // rawSessionId，所以"运行中起的名字 -> 关掉后还在"是接得上的。
+  function aliasFor(row) {
+    if (typeof getSessionAliases !== "function") return null;
+    let aliases = null;
+    try {
+      aliases = getSessionAliases();
+    } catch {
+      return null;
+    }
+    if (!aliases || typeof aliases !== "object" || Array.isArray(aliases)) return null;
+    const key = sessionAliasKey("local", row.agentId, row.sessionId, { cwd: row.cwd });
+    const entry = key ? aliases[key] : null;
+    return entry && typeof entry.title === "string" && entry.title ? entry.title : null;
+  }
+
   function annotate(rows) {
     return rows.map((row) => {
+      const alias = aliasFor(row);
+      if (alias) row = { ...row, title: alias, hasAlias: true };
       // Live state currently identifies local Claude sessions by raw id,
       // not by CLAUDE_CONFIG_DIR. Treat every profile row with that raw id
       // as one conservative launch unit so two Dashboard clicks cannot

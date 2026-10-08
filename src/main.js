@@ -1098,10 +1098,15 @@ function pinEntryFor(pins, agentId, sessionId) {
   return entry && Number.isFinite(entry.pinnedAt) ? entry : null;
 }
 
-function quickHistoryProjection(pins = {}) {
+function quickHistoryProjection(pins = {}, liveRawSessionIds = new Set()) {
   const cached = quickHistoryCache ? quickHistoryCache.peek() : null;
   if (!cached) return { rows: [], truncated: 0 };
-  const rows = cached.rows.slice(0, QUICK_HISTORY_MAX_ROWS)
+  const rows = cached.rows
+    // 缓存里的"历史"可能刚刚已经被续跑拉起来了（磁盘要等下次打开菜单才重读）。
+    // 这里按**当前活着的会话**再滤一遍：否则面板会同时显示一行历史 + 一行刚起来
+    // 的活会话，看着就像"多出了一个同名的会话"。
+    .filter((row) => !liveRawSessionIds.has(row.sessionId))
+    .slice(0, QUICK_HISTORY_MAX_ROWS)
     .map((row) => projectQuickHistoryRow(row, pins));
   // 两处截断都要如实报出来：读盘那一层的（loader 的 limit）和面板这一层的。
   const truncated = cached.truncated + Math.max(0, cached.rows.length - QUICK_HISTORY_MAX_ROWS);
@@ -1148,7 +1153,11 @@ function buildQuickSendState() {
   const pending = quickPendingNewSession;
   const newSessionFolder = resolveQuickNewSessionFolder();
   const pins = quickSessionPins();
-  const history = quickHistoryProjection(pins);
+  const liveRawSessionIds = new Set();
+  for (const item of all) {
+    if (item.rawSessionId) liveRawSessionIds.add(item.rawSessionId);
+  }
+  const history = quickHistoryProjection(pins, liveRawSessionIds);
   // 每条会话的置顶标记。listQuickSessions() 的**顺序一行不动**（下面
   // resolveQuickSessionTarget 拿 all[0] 当"最近活动的会话"兜底），
   // 排序只在下面这两个数组里做。
@@ -5559,6 +5568,9 @@ const sessionHistoryRuntime = createSessionHistoryRuntime({
   launchClaudeSession: (mode, cwd, sessionId, profile) => (
     launchClaudeSession(mode, cwd, sessionId, {}, profile)
   ),
+  // 历史行要用用户起过的名字（会话别名）：不然会话一关，名字就退回成一串
+  // 会话编号，看着像乱码。
+  getSessionAliases: () => _settingsController.get("sessionAliases"),
 });
 
 // 面板要用的那份历史，走 TTL 缓存：读盘只在会话菜单打开时发生一次。

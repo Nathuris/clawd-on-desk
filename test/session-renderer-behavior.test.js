@@ -281,6 +281,7 @@ function hudTranslations(overrides = {}) {
     hudHistoryInterrupted: "Interrupted last time",
     hudHistoryResuming: "Starting…",
     hudHistorySubmitted: "Submitted — waiting for the terminal",
+    hudHistoryNotConfirmed: "No word from the terminal yet — try again",
     hudHistoryResumeFailed: "Could not start it — try again",
     hudHistoryUnresolvable: "No record of that session",
     hudHistoryAgentUnavailable: "That agent is not enabled",
@@ -362,6 +363,7 @@ const HUD_ZH_TRANSLATIONS = hudTranslations({
   hudHistoryInterrupted: "上次没正常收尾",
   hudHistoryResuming: "正在拉起…",
   hudHistorySubmitted: "已提交，等终端上报",
+  hudHistoryNotConfirmed: "还没等到终端上报，可以再试一次",
   hudHistoryResumeFailed: "没能拉起来，可以再试一次",
   hudHistoryUnresolvable: "找不到这个会话的记录",
   hudHistoryAgentUnavailable: "这个 agent 现在没启用",
@@ -570,8 +572,9 @@ async function loadHud(options = {}) {
     resumeSession: async (payload) => {
       calls.resumeSession.push(payload);
       if (options.resumeSessionThrows) throw new Error("resume failed");
-      // 用例可以中途改这个值，模拟"已经跑起来了 / 找不到记录 / 拉不起来"
-      return api.resumeSessionResult || { status: "submitted", retryAt: 1 };
+      // 用例可以中途改这个值，模拟"已经跑起来了 / 找不到记录 / 拉不起来"。
+      // 默认给一个还没到点的确认窗（主进程真实返回的也是这个形状）。
+      return api.resumeSessionResult || { status: "submitted", retryAt: Date.now() + 30000 };
     },
     setSessionPin: async (payload) => {
       calls.setSessionPin.push(payload);
@@ -1458,6 +1461,34 @@ test("quick panel: 历史会话排在「最近」线下面，点一下是续跑�
   // 主进程再推一次状态（整个列表会重建），禁用状态仍然在——状态存在 Map 上而不是节点上
   pushHistory(hud, [historyRow()]);
   assert.strictEqual(hud.one("quick-session-history").disabled, true, "重建后状态不能丢");
+});
+
+test("quick panel: 续跑迟迟等不到上报时如实说，并且能再点一次", async () => {
+  // 真机上踩过的：点了续跑、终端里还要手动信任文件夹，会话迟迟不上报，
+  // 那行字就一直挂着"已提交"不动。超过主进程给的确认窗就得改口，并且放开重试。
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  pushHistory(hud, [historyRow()]);
+  hud.api.resumeSessionResult = { status: "submitted", retryAt: Date.now() + 30000 };
+  await hud.one("quick-session-history").dispatch("click");
+  await flush();
+  assert.match(byClass(hud.one("quick-session-history"), "quick-session-meta")[0].textContent, /已提交/);
+  assert.strictEqual(hud.one("quick-session-history").disabled, true, "等上报期间不能连点");
+  assert.deepStrictEqual(hud.calls.resumeSession.length, 1, "禁用期间再点也不该重复请求");
+
+  // 确认窗已经过去（会话始终没上报）：改口说实话，并且放开重试
+  const expired = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  pushHistory(expired, [historyRow()]);
+  expired.api.resumeSessionResult = { status: "submitted", retryAt: Date.now() - 1 };
+  await expired.one("quick-session-history").dispatch("click");
+  await flush();
+  assert.match(
+    byClass(expired.one("quick-session-history"), "quick-session-meta")[0].textContent,
+    /还没等到终端上报/
+  );
+  assert.strictEqual(expired.one("quick-session-history").disabled, false, "超时后要能再试");
+  await expired.one("quick-session-history").dispatch("click");
+  await flush();
+  assert.strictEqual(expired.calls.resumeSession.length, 2, "再点一次要真的再发一次请求");
 });
 
 test("quick panel: 续跑失败如实说，而且分得清是哪一种", async () => {

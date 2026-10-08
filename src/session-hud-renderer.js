@@ -241,6 +241,7 @@ function updateMenu() {
     // 续跑状态跟着菜单这一轮走：菜单一收就清掉。不然十分钟后重开菜单，那行字
     // 还停在"已提交"上——真相在主进程那边（它会说这条到底活了没有）。
     historyActionState.clear();
+    clearHistoryRefreshTimer();
     if (sessionListEl.children.length) sessionListEl.replaceChildren();
     return;
   }
@@ -455,7 +456,36 @@ async function handleTogglePin(kind, ref, pinned) {
 
 // 续跑的状态机。挂在 Map 上、不挂在 DOM 上：列表一推新状态就整个重建，
 // 挂在节点上的状态会被冲掉，用户就会看到按钮"自己又活了"。
-const historyActionState = new Map(); // historyKey -> { status, reason }
+const historyActionState = new Map(); // historyKey -> { status, reason, retryAt }
+
+// 主进程给的确认窗口（它自己也是这个时长）。过了这个点还没等到会话上报，
+// 就不能再挂着"已提交"了——那是骗人：得如实说"还没等到"，并且让用户能再点一次。
+const HISTORY_SUBMIT_TIMEOUT_MS = 30000;
+let historyRefreshTimer = null;
+
+function submittedExpired(state) {
+  if (!state || state.status !== "submitted") return false;
+  const at = Number.isFinite(state.retryAt) ? state.retryAt : 0;
+  return Date.now() >= at;
+}
+
+function clearHistoryRefreshTimer() {
+  if (historyRefreshTimer) {
+    clearTimeout(historyRefreshTimer);
+    historyRefreshTimer = null;
+  }
+}
+
+// 到点了重画一次，把"已提交"换成"还没等到"。不重画的话那行字会一直挂着不动。
+function scheduleHistoryRefresh(retryAt) {
+  clearHistoryRefreshTimer();
+  if (!Number.isFinite(retryAt)) return;
+  const delay = Math.max(0, retryAt - Date.now()) + 200;
+  historyRefreshTimer = setTimeout(() => {
+    historyRefreshTimer = null;
+    repaintSessionMenu();
+  }, delay);
+}
 
 // 主进程回来的失败原因是分开的，别糅成一句"失败了"——用户得知道能不能再试。
 const RESUME_ERROR_KEYS = {
@@ -468,8 +498,18 @@ const RESUME_ERROR_KEYS = {
 function resumeStateText(state) {
   if (!state) return "";
   if (state.status === "pending") return t("hudHistoryResuming");
-  if (state.status === "submitted") return t("hudHistorySubmitted");
+  if (state.status === "submitted") {
+    return t(submittedExpired(state) ? "hudHistoryNotConfirmed" : "hudHistorySubmitted");
+  }
   return t(RESUME_ERROR_KEYS[state.reason] || "hudHistoryResumeFailed");
+}
+
+// 这一行现在是不是"正忙着"（要禁用）。超时之后的"已提交"不算忙——用户可以再点。
+function historyRowBusy(row) {
+  const local = historyActionState.get(row.historyKey);
+  if (local && local.status === "pending") return true;
+  if (local && local.status === "submitted") return !submittedExpired(local);
+  return row.resumePending === true;
 }
 
 // 这一行现在该显示什么状态词。有本地动作状态就优先显示它（正在拉起/已提交/失败），
@@ -519,9 +559,7 @@ function createHistoryRow(row) {
   button.className = "quick-session-item quick-session-history";
   button.setAttribute("data-history-key", row.historyKey);
   const disabled = !!row.resumeDisabledReason;
-  const busy = historyActionState.get(row.historyKey)?.status === "pending"
-    || historyActionState.get(row.historyKey)?.status === "submitted"
-    || row.resumePending;
+  const busy = historyRowBusy(row);
   if (disabled || busy) {
     button.disabled = true;
     button.classList.add("is-disabled");
@@ -548,8 +586,11 @@ function createHistoryRow(row) {
 // 免得连点两下开出两个进程），再按主进程的回复落到 submitted 或 error。
 async function handleResumeHistoryRow(row) {
   if (row.resumeDisabledReason) return;
+  // 正在拉起的、以及还在等上报的，就别重复发请求；但"等上报"过了确认窗之后
+  // 要放行——用户得能再试一次。
   const current = historyActionState.get(row.historyKey);
-  if (current && (current.status === "pending" || current.status === "submitted")) return;
+  if (current && current.status === "pending") return;
+  if (current && current.status === "submitted" && !submittedExpired(current)) return;
   historyActionState.set(row.historyKey, { status: "pending" });
   repaintSessionMenu();
   let result = null;
@@ -563,7 +604,11 @@ async function handleResumeHistoryRow(row) {
   }
   const status = result && result.status;
   if (status === "submitted") {
-    historyActionState.set(row.historyKey, { status: "submitted" });
+    const retryAt = Number.isFinite(result && result.retryAt)
+      ? result.retryAt
+      : Date.now() + HISTORY_SUBMIT_TIMEOUT_MS;
+    historyActionState.set(row.historyKey, { status: "submitted", retryAt });
+    scheduleHistoryRefresh(retryAt);
   } else if (status === "already-running") {
     // 它其实已经在跑了：从这一组里拿掉，等主进程下一次推送就会出现在上面
     historyActionState.delete(row.historyKey);
