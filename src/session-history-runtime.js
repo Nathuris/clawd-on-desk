@@ -64,6 +64,25 @@ function createSessionHistoryRuntime({ getSessions, isAgentEnabled, launchClaude
     });
   }
 
+  // 现在到底有哪些"点了续跑、还没等到它报到"的会话。
+  //
+  // 为什么不能直接用行上的 resumePending：面板的历史是**缓存**的，缓存里那个
+  // 字段是读盘那一刻的快照。会话起来又关掉之后，面板还拿着旧的 true 在画，
+  // 那行就一直写着「已提交，等终端上报」，过一会儿才对。
+  // 这里顺带跑一次 activeIds()：它会把"已经被看到活着"的续跑记录清掉——所以
+  // 只要会话真的起来过，这一次查询就不会再把它算成待确认。
+  function pendingResumes() {
+    const active = activeIds();
+    const historyKeys = new Set();
+    const sessionIds = new Set();
+    for (const [historyKey, entry] of launches) {
+      if (entry.launching) continue;
+      historyKeys.add(historyKey);
+      sessionIds.add(entry.sessionId);
+    }
+    return { historyKeys, sessionIds, activeRawSessionIds: active };
+  }
+
   // 面板要比 Dashboard 多知道一件事：有多少条被 limit 截掉了（好如实说
   // 「还有 N 条更早的」），所以另开一个带统计的入口，getHistory 保持原样。
   function getHistoryWithStats() {
@@ -128,7 +147,7 @@ function createSessionHistoryRuntime({ getSessions, isAgentEnabled, launchClaude
     return resolveHistoryIdentity(agentId, historyKey, historyOptions);
   }
 
-  return { getHistory, getHistoryWithStats, resume, resolveIdentity };
+  return { getHistory, getHistoryWithStats, resume, resolveIdentity, pendingResumes };
 }
 
 module.exports = { createSessionHistoryRuntime, RESUME_CONFIRMATION_MS };

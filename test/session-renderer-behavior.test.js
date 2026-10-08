@@ -1463,6 +1463,32 @@ test("quick panel: 历史会话排在「最近」线下面，点一下是续跑�
   assert.strictEqual(hud.one("quick-session-history").disabled, true, "重建后状态不能丢");
 });
 
+test("quick panel: 会话活过来又关掉之后，那行不该还挂着上一次的「已提交」", async () => {
+  // 真机上踩过的顺序：点续跑 -> 会话在终端里起来（这行从「最近」里消失）->
+  // 用户把会话关掉（这行又回来）-> 它却还写着"已提交，等终端上报"。
+  // 会话活过来这件事本身就该把这条状态清掉。
+  const hud = await loadHud({ i18n: { lang: PANEL_ZH, translations: HUD_ZH_TRANSLATIONS } });
+  pushHistory(hud, [historyRow()]);
+  hud.api.resumeSessionResult = { status: "submitted", retryAt: Date.now() + 30000 };
+  await hud.one("quick-session-history").dispatch("click");
+  await flush();
+  assert.match(byClass(hud.one("quick-session-history"), "quick-session-meta")[0].textContent, /已提交/);
+
+  // 会话起来了：主进程把这一行从历史里拿掉（进了"活着"那一组）
+  pushHistory(hud, []);
+  assert.strictEqual(hud.one("quick-session-history"), null, "活着的会话不该还在历史里");
+
+  // 用户在终端里把它关掉：这行回到历史列表，应该干干净净，不该带着旧状态
+  pushHistory(hud, [historyRow()]);
+  const back = hud.one("quick-session-history");
+  assert.strictEqual(
+    byClass(back, "quick-session-meta")[0].textContent,
+    "乐谱 · 已结束 · 2小时前",
+    "回到历史列表时不该还挂着上一次的续跑状态"
+  );
+  assert.strictEqual(back.disabled, false, "而且应该是可以直接点的");
+});
+
 test("quick panel: 续跑迟迟等不到上报时如实说，并且能再点一次", async () => {
   // 真机上踩过的：点了续跑、终端里还要手动信任文件夹，会话迟迟不上报，
   // 那行字就一直挂着"已提交"不动。超过主进程给的确认窗就得改口，并且放开重试。

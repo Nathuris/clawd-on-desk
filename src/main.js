@@ -1056,7 +1056,7 @@ function listQuickSessions() {
 // 面板里「最近」那一组的一行。只带展示要用的字段 + 一个不透明的 historyKey：
 // 完整的 session id、cwd 全路径、transcript 路径都不进 IPC（loader 本来就刻意
 // 不带路径，这里也别加回来）。续跑时渲染端只把这个 key 递回来，主进程自己回查。
-function projectQuickHistoryRow(row, pins = {}) {
+function projectQuickHistoryRow(row, pins = {}, pending = null) {
   const pinKey = sessionPinKey(row.agentId, row.sessionId);
   const pin = pinKey ? pins[pinKey] : null;
   return {
@@ -1075,7 +1075,11 @@ function projectQuickHistoryRow(row, pins = {}) {
       : (row.transcriptPresent === false ? false : null),
     resumeDisabledReason: row.resumeDisabledReason || null,
     group: row.group === "other" ? "other" : "confirmed",
-    resumePending: row.resumePending === true,
+    // 「点了续跑、还没等到报到」要**现算**，不能用缓存里那个字段：历史是缓存的，
+    // 会话起来又关掉之后，缓存里还留着旧的 true，面板就会一直写着「已提交」。
+    resumePending: pending
+      ? (pending.historyKeys.has(row.historyKey) || pending.sessionIds.has(row.sessionId))
+      : row.resumePending === true,
     // 置顶状态与钉的时间（排序用）。是否钉着由主进程判断，渲染端只管画。
     pinned: !!pin,
     pinnedAt: pin ? pin.pinnedAt : null,
@@ -1098,7 +1102,7 @@ function pinEntryFor(pins, agentId, sessionId) {
   return entry && Number.isFinite(entry.pinnedAt) ? entry : null;
 }
 
-function quickHistoryProjection(pins = {}, liveRawSessionIds = new Set()) {
+function quickHistoryProjection(pins = {}, liveRawSessionIds = new Set(), pending = null) {
   const cached = quickHistoryCache ? quickHistoryCache.peek() : null;
   if (!cached) return { rows: [], truncated: 0 };
   const rows = cached.rows
@@ -1107,7 +1111,7 @@ function quickHistoryProjection(pins = {}, liveRawSessionIds = new Set()) {
     // 的活会话，看着就像"多出了一个同名的会话"。
     .filter((row) => !liveRawSessionIds.has(row.sessionId))
     .slice(0, QUICK_HISTORY_MAX_ROWS)
-    .map((row) => projectQuickHistoryRow(row, pins));
+    .map((row) => projectQuickHistoryRow(row, pins, pending));
   // 两处截断都要如实报出来：读盘那一层的（loader 的 limit）和面板这一层的。
   const truncated = cached.truncated + Math.max(0, cached.rows.length - QUICK_HISTORY_MAX_ROWS);
   return { rows, truncated };
@@ -1157,7 +1161,12 @@ function buildQuickSendState() {
   for (const item of all) {
     if (item.rawSessionId) liveRawSessionIds.add(item.rawSessionId);
   }
-  const history = quickHistoryProjection(pins, liveRawSessionIds);
+  // pendingResumes() 每次都会顺手清掉"已经被看到活着"的续跑记录，
+  // 所以会话只要真的起来过，这里就不会再把它当成待确认。
+  const pendingResumes = sessionHistoryRuntime && typeof sessionHistoryRuntime.pendingResumes === "function"
+    ? sessionHistoryRuntime.pendingResumes()
+    : null;
+  const history = quickHistoryProjection(pins, liveRawSessionIds, pendingResumes);
   // 每条会话的置顶标记。listQuickSessions() 的**顺序一行不动**（下面
   // resolveQuickSessionTarget 拿 all[0] 当"最近活动的会话"兜底），
   // 排序只在下面这两个数组里做。

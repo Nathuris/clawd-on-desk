@@ -663,6 +663,16 @@ function patchSettingsMenu() {
 // 会话菜单：滚动区（排好的新会话 + 会话列表）+ 底部固定的新建 / 选文件夹。
 function renderSessionMenu() {
   ensureSessionShells();
+  // 续跑状态只保留"还在列表里"的那些行：会话活过来之后那行会从列表里消失，
+  // 等它再被关掉、重新出现在历史里时，不该还挂着上一次的「已提交」。
+  const presentHistoryKeys = new Set();
+  for (const row of quickState.history) presentHistoryKeys.add(row.historyKey);
+  for (const item of quickState.pinnedItems) {
+    if (item.kind === "history") presentHistoryKeys.add(item.historyKey);
+  }
+  for (const key of [...historyActionState.keys()]) {
+    if (!presentHistoryKeys.has(key)) historyActionState.delete(key);
+  }
   // 列表能滚了，排好的新会话（占位行）不再需要挤掉一条会话——它只是排在最上面。
   const items = quickState.sessions.slice(0, SESSION_RENDER_LIMIT);
   const nodes = [];

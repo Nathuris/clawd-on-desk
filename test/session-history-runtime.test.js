@@ -187,6 +187,31 @@ describe("session history resume owner", () => {
     assert.strictEqual(rows[0].sessionId, identity.sessionId);
   });
 
+  it("待确认的续跑要现算：会话起来过之后就不再算待确认", async () => {
+    // 面板的历史是缓存的。会话起来又关掉之后，缓存里那个 resumePending 还是
+    // 旧的 true，那行就会一直写着「已提交，等终端上报」。所以面板改成每次投影
+    // 都现算一次——这个入口就是给它用的。
+    let finish;
+    runtime = makeRuntime(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = runtime.resume(payload);
+    await Promise.resolve();
+    finish({ ok: true });
+    await pending;
+
+    const before = runtime.pendingResumes();
+    assert.strictEqual(before.historyKeys.has(payload.historyKey), true);
+    assert.strictEqual(before.sessionIds.has(identity.sessionId), true);
+
+    // 会话报到了：同一份记录不能再被当成"待确认"
+    sessions.set("live-1", {
+      agentId: "claude-code", profileId: "local", rawSessionId: identity.sessionId,
+    });
+    const after = runtime.pendingResumes();
+    assert.strictEqual(after.historyKeys.size, 0, "已经被看到活着的续跑记录必须清掉");
+    assert.strictEqual(after.sessionIds.size, 0);
+    assert.strictEqual(after.activeRawSessionIds.has(identity.sessionId), true);
+  });
+
   it("带统计的那个入口：行完全一样，另外告诉面板截掉了多少条", () => {
     const stats = runtime.getHistoryWithStats();
     assert.deepEqual(stats.rows, runtime.getHistory(), "两条入口的行必须一致");
