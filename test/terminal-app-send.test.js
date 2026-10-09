@@ -116,6 +116,45 @@ test("成功投递：按 tty 定位标签页并执行 do script", async () => {
   assert.ok(psCall.args[3].split(",").every((pid) => pid !== "100"));
 });
 
+test("送进去之后补一个独立回车：长消息不会被 claude 当成「粘贴」卡在输入框", async () => {
+  // 真机上踩过的：do script 把整段文字一口气塞进去，claude 当成粘贴处理，末尾那个
+  // 回车被算成粘贴内容（变成输入框里的换行），消息就停在那儿不发送。
+  // 补救办法是隔一小会儿单独再发一个回车——它独立到达，claude 才认成"按发送"。
+  const { sender, calls } = makeSender((command, args) => {
+    if (command === "ps" && args[1] === "comm=") return TERMINAL_COMM;
+    if (command === "ps") return CHAIN_PS;
+    if (command === "osascript") return { stdout: "sent\n" };
+    return {};
+  });
+  const result = await sender.deliver({
+    sourcePid: 100, pidChain: [200, 15267],
+    text: "帮我看看这张图 /Users/me/我的图 片.png",
+  });
+  assert.equal(result.status, "sent");
+
+  const osaCalls = calls.filter((call) => call.command === "osascript");
+  assert.equal(osaCalls.length, 3, "一次送文字，后面补两次回车（长短消息都兜住）");
+  // 第一发：带着消息本身
+  assert.match(osaCalls[0].args[1], /帮我看看这张图/);
+  // 第二发：只有回车，不带消息（不能把消息再发一遍）
+  for (const call of osaCalls.slice(1)) {
+    assert.match(call.args[1], /do script "" in t/);
+    assert.doesNotMatch(call.args[1], /帮我看看这张图/, "补的是空回车，不能把消息再发一遍");
+    assert.match(call.args[1], /\/dev\/ttys001/, "补回车要打同一个 tty");
+  }
+});
+
+test("没真送进去时绝不补回车（没送成还敲回车 = 乱发一气）", async () => {
+  const { sender, calls } = makeSender((command, args) => {
+    if (command === "ps" && args[1] === "comm=") return TERMINAL_COMM;
+    if (command === "ps") return CHAIN_PS;
+    if (command === "osascript") return { stdout: "not-busy\n" };
+    return {};
+  });
+  await sender.deliver({ sourcePid: 100, pidChain: [200], text: "hi" });
+  assert.equal(calls.filter((call) => call.command === "osascript").length, 1);
+});
+
 test("标签页回到 shell 提示符（not busy）时如实返回，不执行任何东西", async () => {
   const { sender } = makeSender((command, args) => {
     if (command === "ps" && args[1] === "comm=") return TERMINAL_COMM;

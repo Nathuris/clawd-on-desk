@@ -19,6 +19,12 @@ const defaultPath = require("path");
 
 const PS_TIMEOUT_MS = 800;
 const OSA_TIMEOUT_MS = 2500;
+// 文字送进去之后，隔多久补那个"按发送"的回车。太短会跟那一大团输入挤在一起、
+// 还是被当成粘贴；太长用户会觉得卡。350ms 实测够分开。
+const ENTER_CONFIRM_DELAY_MS = 350;
+// 消息越长，claude 消化那一团字要越久，补第一个回车可能还被吞着。第二个隔远一点，
+// 到那时输入早就"落定"了。补在空输入上的回车什么也不做，所以多补一个没有副作用。
+const ENTER_CONFIRM_SECOND_DELAY_MS = 1300;
 // 进程链上最多看几个 pid（与 focus.js 的 iTerm2 分支一致）
 const MAX_PID_CANDIDATES = 8;
 // 与面板输入框的上限一致（session-ipc 的 QUICK_PROMPT_MAX_LENGTH），这里再兜一层。
@@ -71,6 +77,24 @@ function buildSendScript(ttyName, text) {
     '          return "sent"',
     "        end if",
     '        return "not-busy"',
+    "      end if",
+    "    end repeat",
+    "  end repeat",
+    "end tell",
+    'return "not-found"',
+  ].join("\n");
+}
+
+// 只送一个回车。用途见 deliver() 里那段注释：长消息被 claude 当成"粘贴"时，
+// 末尾那个回车会变成输入框里的一个换行，得再补一个独立到达的回车来按发送。
+function buildEnterScript(ttyName) {
+  return [
+    'tell application "Terminal"',
+    "  repeat with w in windows",
+    "    repeat with t in tabs of w",
+    `      if (tty of t) is "${ttyName}" then`,
+    '        do script "" in t',
+    '        return "sent"',
     "      end if",
     "    end repeat",
     "  end repeat",
@@ -209,7 +233,22 @@ function createTerminalAppSender(options = {}) {
       return { status, tty };
     }
     const verdict = String(stdout).trim();
-    if (verdict === "sent") return { status: "sent", tty };
+    if (verdict === "sent") {
+      // 补一个独立到达的回车。
+      //
+      // 为什么需要：do script 是把整段文字**一口气**塞进那个标签页的，claude 收到
+      // 这种"一大团瞬间到达"的输入会当成**粘贴**处理——末尾那个回车于是被算成粘贴
+      // 内容的一部分（变成输入框里的一个换行），消息就停在输入框里不发送。实测：
+      // 短消息没事，长消息（或者带文件路径的）必然中招。
+      // 隔一小会儿单独补一个回车，它是独立到达的，claude 就认成"按发送"。
+      // 短消息本来就已经发出去了：那一行空了，空回车什么都不做。
+      for (const delay of [ENTER_CONFIRM_DELAY_MS, ENTER_CONFIRM_SECOND_DELAY_MS]) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        const enter = await run("osascript", ["-e", buildEnterScript(tty)], OSA_TIMEOUT_MS);
+        if (enter.err) log("terminal-app-send: 补回车失败（消息本身已经送进去了）");
+      }
+      return { status: "sent", tty };
+    }
     if (verdict === "not-busy") return { status: "not-busy", tty };
     if (verdict === "not-found") return { status: "not-found", tty };
     return { status: "error", tty };
