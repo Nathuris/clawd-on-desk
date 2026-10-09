@@ -76,7 +76,8 @@ docs/**
 !docs/releases/release-v1.3.3.md
 !docs/releases/release-v1.3.4.md
 !docs/releases/release-v1.3.5.md
-!docs/releases/release-page-copy-v1.3.5.md
+!docs/releases/release-v1.3.6.md
+!docs/releases/release-page-copy-v1.3.6.md
 
 # Temp files from testing
 .tmp_*
